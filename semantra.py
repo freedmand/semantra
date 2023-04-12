@@ -4,9 +4,14 @@ import os
 import struct
 import tqdm
 from annoy import AnnoyIndex
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, send_file, make_response
 import click
 from models import models, BaseModel, TransformerModel
+import pypdfium2 as pdfium
+import io
+from multiprocessing import Lock
+
+mutex = Lock()
 
 
 def join_text_chunks(chunks):
@@ -51,9 +56,84 @@ def safe_remove(filename):
         pass
 
 
-def get_text_content(filename):
-    with open(filename, "r") as f:
-        return f.read()
+def file_md5(filename):
+    hash_md5 = hashlib.md5()
+    with open(filename, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()[:10]
+
+
+class Content:
+    def __init__(self, rawtext, filename):
+        self.rawtext = rawtext
+        self.filename = filename
+        self.filetype = "text"
+
+
+class PDFContent:
+    def __init__(self, rawtext, filename, positions, pdf):
+        self.rawtext = rawtext
+        self.filename = filename
+        self.positions = positions
+        self.pdf = pdf
+        self.pdfium = pdfium.PdfDocument(filename)
+        self.filetype = "pdf"
+
+    def __del__(self):
+        self.pdf.close()
+
+
+def get_pdf_content(filename, semantra_dir, base_filename):
+    hash = file_md5(filename)
+    converted_txt = os.path.join(semantra_dir, base_filename + f".{hash}.txt")
+    position_index = os.path.join(
+        semantra_dir, base_filename + f".{hash}.positions.json"
+    )
+
+    import pdfplumber
+
+    pdf = pdfplumber.open(filename)
+
+    if not os.path.exists(converted_txt) or not os.path.exists(position_index):
+        positions = []
+        position = 0
+        with open(converted_txt, "w", encoding="utf-8", errors="ignore") as f:
+            for page in tqdm.tqdm(pdf.pages, desc="Extracting PDF contents"):
+                page_width = page.width
+                page_height = page.height
+                textmap = page.get_textmap()
+                pagetext = "".join([tuple[0] for tuple in textmap.tuples])
+                positions.append(
+                    {
+                        "char_index": position,
+                        "page_width": page_width,
+                        "page_height": page_height,
+                    }
+                )
+                position += f.write(pagetext)
+                position += f.write("\f")
+        with open(position_index, "w") as f:
+            json.dump(positions, f)
+        with open(converted_txt, "r") as f:
+            rawtext = f.read()
+        return PDFContent(rawtext, filename, positions, pdf)
+    else:
+        with open(converted_txt, "r", encoding="utf-8", errors="ignore") as f:
+            rawtext = f.read()
+        with open(position_index, "r") as f:
+            positions = json.load(f)
+
+        return PDFContent(rawtext, filename, positions, pdf)
+
+
+def get_text_content(filename, semantra_dir, base_filename):
+    if filename.endswith(".pdf"):
+        return get_pdf_content(filename, semantra_dir, base_filename)
+
+    with open(filename, "r", encoding="utf-8", errors="ignore") as f:
+        rawtext = f.read()
+        return Content(rawtext, filename)
 
 
 def get_embeddings_dbs(filenames, num_dimensions, windows, window_indices, embeddings):
@@ -118,7 +198,7 @@ def get_binary_embedding_offsets(
     return offsets, windows, window_indices, num_tokens
 
 
-TRANSFORMER_POOL_DEFAULT = 100
+TRANSFORMER_POOL_DEFAULT = 15000
 TRANSFORMER_WINDOW_TOKEN_LIMIT_DEFAULT = 128
 
 
@@ -163,7 +243,13 @@ TRANSFORMER_WINDOW_TOKEN_LIMIT_DEFAULT = 128
     "--pool-size",
     type=int,
     default=None,
-    help="Number of embeddings to pool together in requests",
+    help="Max number of embedding tokens to pool together in requests",
+)
+@click.option(
+    "--pool-count",
+    type=int,
+    default=None,
+    help="Max number of embeddings to pool together in requests",
 )
 @click.option(
     "--num-dimensions",
@@ -190,6 +276,7 @@ def get_embeddings(
     divide_factor=4,
     use_offset=True,
     pool_size=None,
+    pool_count=None,
     num_dimensions=None,
     window_token_limit=None,
     model="mpnet",
@@ -223,6 +310,8 @@ def get_embeddings(
         model_params = model_config["params"]
         if pool_size is None:
             pool_size = model_config["pool_size"]
+        if pool_count is None:
+            pool_count = model_config.get("pool_count", None)
         model: BaseModel = model_config["get_model"]()
 
     if semantra_dir is None:
@@ -233,7 +322,9 @@ def get_embeddings(
         os.makedirs(semantra_dir)
 
     # Load the text of the file
-    text = get_text_content(filename)
+    base_filename = os.path.basename(filename)
+    content = get_text_content(filename, semantra_dir, base_filename)
+    text = content.rawtext
 
     # All the parameters that affect the output of the embeddings
     config = {
@@ -249,7 +340,6 @@ def get_embeddings(
 
     hashable_config_contents = json.dumps(config)
     config_key = hashlib.shake_256(hashable_config_contents.encode()).hexdigest(10)
-    base_filename = os.path.basename(filename)
     tokens_filename = os.path.join(
         semantra_dir, get_tokens_filename(config_key, base_filename)
     )
@@ -366,9 +456,11 @@ def get_embeddings(
 
         # Write embeddings
         pool = []
+        pool_token_count = 0
 
         def flush_pool():
             nonlocal pool
+            nonlocal pool_token_count
             nonlocal embeddings
             nonlocal f
 
@@ -378,6 +470,7 @@ def get_embeddings(
                 for embedding in embedding_results:
                     write_embedding(f, embedding, num_dimensions)
                 pool = []
+                pool_token_count = 0
 
         with open(embeddings_filename, "ab") as f:
             with tqdm.tqdm(total=num_embedding_tokens) as pbar:
@@ -396,7 +489,10 @@ def get_embeddings(
                         continue
 
                     pool.append(offset)
-                    if len(pool) == pool_size:
+                    pool_token_count += size
+                    if (
+                        pool_count is not None and len(pool) >= pool_count
+                    ) or pool_token_count >= pool_size:
                         flush_pool()
                     pbar.update(size)
 
@@ -432,6 +528,45 @@ def get_embeddings(
             text = join_text_chunks(text_chunks[offset[0] : offset[1]])
             results.append({"text": text, "distance": distance, "offset": offset})
         return jsonify(results)
+
+    @app.route("/api/filetype", methods=["GET"])
+    def filetype():
+        return jsonify(content.filetype)
+
+    @app.route("/api/getfile", methods=["GET"])
+    def getfile():
+        filename = content.filename
+        return send_file(filename)
+
+    @app.route("/api/pdfpositions", methods=["GET"])
+    def pdfpositions():
+        if content.filetype == "pdf":
+            return jsonify(content.positions)
+        else:
+            return jsonify([])
+
+    @app.route("/api/pdfpage", methods=["GET"])
+    def pdfpage():
+        page = request.args.get("page")
+        scale = request.args.get("scale")
+        if content.filetype == "pdf":
+            with mutex:
+                page = content.pdfium[int(page)]
+                bitmap = page.render(scale=float(scale))
+                pil_image = bitmap.to_pil()
+            img_byte_arr = io.BytesIO()
+            pil_image.save(img_byte_arr, format="PNG")
+            response = make_response(img_byte_arr.getvalue())
+            response.headers.set("Content-Type", "image/png")
+            return response
+
+    @app.route("/api/pdfchars", methods=["GET"])
+    def pdfchars():
+        if content.filetype != "pdf":
+            return jsonify([])
+        page = request.args.get("page")
+        textmap = content.pdf.pages[int(page)].get_textmap()
+        return jsonify(textmap.tuples)
 
     @app.route("/api/text", methods=["GET"])
     def text():

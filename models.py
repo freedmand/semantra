@@ -47,7 +47,7 @@ class BaseModel(ABC):
 
     def embed_query(self, query: str) -> "list[float]":
         tokens = self.get_tokens(query)
-        return self.embed(tokens, [(0, len(tokens["input_ids"][0]))])[0]
+        return self.embed(tokens, [(0, self.get_token_length(tokens))])[0]
 
 
 class OpenAIModel(BaseModel):
@@ -144,7 +144,8 @@ models = {
         "num_dimensions": 1536,
         "cost_per_token": 0.0004 / 1000,
         "window_token_limit": 7900,  # technically 8192 but sometimes tiktoken gives an inaccurate count
-        "pool_size": 500,
+        "pool_size": 50000,
+        "pool_count": 2000,
         "get_model": lambda: OpenAIModel(
             model_name="text-embedding-ada-002", tokenizer_name="cl100k_base"
         ),
@@ -157,7 +158,7 @@ models = {
         "num_dimensions": 384,
         "cost_per_token": None,
         "window_token_limit": 128,
-        "pool_size": 500,
+        "pool_size": 50000,
         "get_model": lambda: TransformerModel(model_name=minilm_model_name),
     },
     "mpnet": {
@@ -168,7 +169,7 @@ models = {
         "num_dimensions": 768,
         "cost_per_token": None,
         "window_token_limit": 128,
-        "pool_size": 100,
+        "pool_size": 15000,
         "get_model": lambda: TransformerModel(model_name=mpnet_model_name),
     },
 }

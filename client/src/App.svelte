@@ -4,14 +4,18 @@
   import TextView from "./components/TextView.svelte";
   import Tailwindcss from "./Tailwind.svelte";
   import SearchBar from "./components/SearchBar.svelte";
-  import type { SearchResult } from "./types";
+  import type { PdfPosition, SearchResult } from "./types";
+  import PdfView from "./components/PdfView.svelte";
 
   let tokens: string[] = [];
   let text: string | null = null;
+  let filetype: "text" | "pdf" | null;
+  let pdfPositions: PdfPosition[] = [];
 
   let searchResults: SearchResult[] = [];
 
   let textView: TextView;
+  let pdfView: PdfView;
 
   async function handleSearch(query: string) {
     // Ignore empty queries
@@ -28,13 +32,21 @@
   }
 
   onMount(async () => {
+    const filetypeResponse = await fetch("/api/filetype");
+    filetype = await filetypeResponse.json();
+
+    if (filetype === "pdf") {
+      const response = await fetch("/api/pdfpositions");
+      pdfPositions = await response.json();
+    }
+
     const response = await fetch("/api/text");
     tokens = await response.json();
     text = tokens.join("");
   });
 
   $: tokenOffsets = tokens.reduce(
-    (acc, token, index) => {
+    (acc, token) => {
       const lastOffset = acc[acc.length - 1];
       acc.push(lastOffset + token.length);
       return acc;
@@ -43,10 +55,17 @@
   );
 
   function jumpToResult(searchResult: SearchResult) {
-    textView.navigate(
-      tokenOffsets[searchResult.offset[0]],
-      tokenOffsets[searchResult.offset[1]]
-    );
+    if (textView) {
+      textView.navigate(
+        tokenOffsets[searchResult.offset[0]],
+        tokenOffsets[searchResult.offset[1]]
+      );
+    } else if (pdfView) {
+      pdfView.navigate(
+        tokenOffsets[searchResult.offset[0]],
+        tokenOffsets[searchResult.offset[1]]
+      );
+    }
   }
 </script>
 
@@ -62,7 +81,14 @@
       on:navigate={(e) => jumpToResult(e.detail)}
       {searchResults}
     />
-    <TextView bind:this={textView} text={text == null ? "Loading..." : text} />
+    {#if filetype == "text"}
+      <TextView
+        bind:this={textView}
+        text={text == null ? "Loading..." : text}
+      />
+    {:else if filetype === "pdf"}
+      <PdfView bind:this={pdfView} positions={pdfPositions} />
+    {/if}
   </article>
 </main>
 
