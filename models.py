@@ -77,10 +77,14 @@ def zero_if_none(x):
 
 
 class TransformerModel(BaseModel):
-    def __init__(self, model_name):
+    def __init__(self, model_name, cuda=None):
+        if cuda is None:
+            cuda = torch.cuda.is_available()
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name)
+        if self.cuda:
+            self.model = self.model.cuda()
 
     def get_tokens(self, text: str):
         return self.tokenizer(
@@ -127,6 +131,9 @@ class TransformerModel(BaseModel):
             batch_first=True,
             padding_value=0,
         )
+        if self.cuda:
+            input_ids = input_ids.cuda()
+            attention_mask = attention_mask.cuda()
         with torch.no_grad():
             model_output = self.model(
                 input_ids=input_ids,
