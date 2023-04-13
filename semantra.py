@@ -486,7 +486,7 @@ def process(
     "--min-window-tokens",
     type=int,
     default=8,
-    help="Minimum window size for embedding tokens (default 8)",
+    help="Minimum window size for embedding tokens (default 128)",
 )
 @click.option(
     "--divide-factor",
@@ -533,7 +533,7 @@ def process(
 def get_embeddings(
     filename,
     max_window_tokens=128,
-    min_window_tokens=8,
+    min_window_tokens=128,
     divide_factor=4,
     use_offset=True,
     pool_size=None,
@@ -553,10 +553,7 @@ def get_embeddings(
         if window_token_limit is None:
             window_token_limit = TRANSFORMER_WINDOW_TOKEN_LIMIT_DEFAULT
 
-        model_params = {
-            "type": "transformers",
-            "model_name": transformer_model,
-        }
+        model_params = {"type": "transformers", "model_name": transformer_model}
         cost_per_token = None
         model = TransformerModel(transformer_model)
     else:

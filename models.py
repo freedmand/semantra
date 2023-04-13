@@ -83,6 +83,7 @@ class TransformerModel(BaseModel):
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name)
+        self.cuda = cuda
         if self.cuda:
             self.model = self.model.cuda()
 
