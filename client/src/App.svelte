@@ -1,18 +1,68 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import SearchResults from "./components/SearchResults.svelte";
   import TextView from "./components/TextView.svelte";
   import Tailwindcss from "./Tailwind.svelte";
   import SearchBar from "./components/SearchBar.svelte";
-  import type { PdfPosition, SearchResult } from "./types";
+  import type {
+    File,
+    Navigation,
+    PdfPosition,
+    SearchResult,
+    SearchResultSet,
+  } from "./types";
   import PdfView from "./components/PdfView.svelte";
+  import TabBar from "./components/TabBar.svelte";
 
+  let files: File[] = [];
+  let activeFileIndex = 0;
   let tokens: string[] = [];
   let text: string | null = null;
-  let filetype: "text" | "pdf" | null;
   let pdfPositions: PdfPosition[] = [];
+  let updating = false;
 
-  let searchResults: SearchResult[] = [];
+  $: activeFile =
+    activeFileIndex < files.length ? files[activeFileIndex] : null;
+  $: filesByPath = Object.fromEntries(
+    files.map((file) => [file.filename, file])
+  );
+  $: fileIndicesByPath = Object.fromEntries(
+    files.map((file, index) => [file.filename, index])
+  );
+
+  $: updateFile(activeFile);
+
+  async function updateFile(file: File | null) {
+    // Reset everything
+    tokens = [];
+    text = null;
+    pdfPositions = [];
+
+    if (file == null) return;
+
+    updating = true;
+
+    // Get text
+    const textResponse = await fetch(
+      `/api/text?filename=${encodeURIComponent(file.filename)}`
+    );
+    tokens = await textResponse.json();
+    text = tokens.join("");
+
+    if (file.filetype === "pdf") {
+      const pdfResponse = await fetch(
+        `/api/pdfpositions?filename=${encodeURIComponent(file.filename)}`
+      );
+      pdfPositions = await pdfResponse.json();
+    }
+
+    await tick();
+    navigate();
+
+    updating = false;
+  }
+
+  let searchResultSet: SearchResultSet = [];
 
   let textView: TextView;
   let pdfView: PdfView;
@@ -28,21 +78,12 @@
       },
       body: JSON.stringify({ query }),
     });
-    searchResults = await response.json();
+    searchResultSet = await response.json();
   }
 
   onMount(async () => {
-    const filetypeResponse = await fetch("/api/filetype");
-    filetype = await filetypeResponse.json();
-
-    if (filetype === "pdf") {
-      const response = await fetch("/api/pdfpositions");
-      pdfPositions = await response.json();
-    }
-
-    const response = await fetch("/api/text");
-    tokens = await response.json();
-    text = tokens.join("");
+    const filesResponse = await fetch("/api/files");
+    files = await filesResponse.json();
   });
 
   $: tokenOffsets = tokens.reduce(
@@ -54,24 +95,38 @@
     [0]
   );
 
-  function jumpToResult(searchResult: SearchResult) {
+  let pendingNavigation: Navigation | null = null;
+
+  function navigate() {
+    if (pendingNavigation == null) return;
     if (textView) {
       textView.navigate(
-        tokenOffsets[searchResult.offset[0]],
-        tokenOffsets[searchResult.offset[1]]
+        tokenOffsets[pendingNavigation.searchResult.offset[0]],
+        tokenOffsets[pendingNavigation.searchResult.offset[1]]
       );
     } else if (pdfView) {
       pdfView.navigate(
-        tokenOffsets[searchResult.offset[0]],
-        tokenOffsets[searchResult.offset[1]]
+        tokenOffsets[pendingNavigation.searchResult.offset[0]],
+        tokenOffsets[pendingNavigation.searchResult.offset[1]]
       );
+    }
+    pendingNavigation = null;
+  }
+
+  async function jumpToResult(result: Navigation) {
+    pendingNavigation = result;
+    const newFileIndex = fileIndicesByPath[result.file.filename];
+    if (newFileIndex !== activeFileIndex) {
+      activeFileIndex = newFileIndex;
+    } else {
+      navigate();
     }
   }
 </script>
 
 <Tailwindcss />
 
-<main class="flex flex-col h-full">
+<main class="flex flex-col h-full bg-slate-100">
   <header class="flex flex-row items-center border-b-4 border-black py-4 px-8">
     <h1 class="text-3xl font-mono font-bold inline-flex pr-6">Semantra</h1>
     <SearchBar on:search={(e) => handleSearch(e.detail)} />
@@ -79,16 +134,28 @@
   <article class="flex flex-1 flex-row relative items-stretch">
     <SearchResults
       on:navigate={(e) => jumpToResult(e.detail)}
-      {searchResults}
+      {filesByPath}
+      {searchResultSet}
     />
-    {#if filetype == "text"}
-      <TextView
-        bind:this={textView}
-        text={text == null ? "Loading..." : text}
-      />
-    {:else if filetype === "pdf"}
-      <PdfView bind:this={pdfView} positions={pdfPositions} />
-    {/if}
+    <div class="flex flex-col w-2/3">
+      {#if activeFile != null}
+        <TabBar disabled={updating} bind:index={activeFileIndex} {files} />
+        {#if activeFile.filetype === "text"}
+          <TextView
+            bind:this={textView}
+            text={text == null ? "Loading..." : text}
+          />
+        {:else if activeFile.filetype === "pdf"}
+          <PdfView
+            bind:this={pdfView}
+            file={activeFile}
+            positions={pdfPositions}
+          />
+        {/if}
+      {:else}
+        <div class="text-gray-600 ml-2 mt-2 text-sm">Loading...</div>
+      {/if}
+    </div>
   </article>
 </main>
 

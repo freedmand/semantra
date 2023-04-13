@@ -11,7 +11,7 @@
 
 <div class="flex items-center relative flex-1">
   <input
-    class="bg-gray-200 py-2 px-4 pl-12 font-mono w-full rounded"
+    class="bg-white py-2 px-4 pl-12 font-mono w-full rounded border-black border"
     placeholder="enter a search query"
     bind:value
     on:keydown={(e) => {

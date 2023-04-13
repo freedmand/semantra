@@ -1,6 +1,7 @@
 <script lang="ts">
   import Ace from "ace-builds/src-noconflict/ace";
   import { onMount } from "svelte";
+  import type { Navigation } from "../types";
 
   let editorElement: HTMLDivElement;
 
@@ -45,18 +46,6 @@
     // Set text
     editor.setValue(text);
     editor.selection.setRange(new Ace.Range(0, 0, 0, 0));
-
-    // Add a marker
-    const startPos = editor.session.doc.indexToPosition(0);
-    const endPos = editor.session.doc.indexToPosition(100);
-    console.log(startPos, endPos);
-    const range = new Ace.Range(
-      startPos.row,
-      startPos.column,
-      endPos.row,
-      endPos.column
-    );
-    // editor.session.addMarker(range, "myMarker", "text");
   });
 
   $: {

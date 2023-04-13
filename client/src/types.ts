@@ -1,9 +1,22 @@
 export type Offset = [number, number];
 
+export interface File {
+  basename: string;
+  filename: string;
+  filetype: "text" | "pdf";
+}
+
+export type SearchResultSet = [string, SearchResult[]][];
+
 export interface SearchResult {
   distance: number;
   text: string;
   offset: [number, number];
+}
+
+export interface Navigation {
+  file: File;
+  searchResult: SearchResult;
 }
 
 export interface PdfPosition {

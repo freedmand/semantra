@@ -1,8 +1,9 @@
 <script lang="ts">
-  import type { Offset, PdfPosition } from "../types";
+  import type { File, Offset, PdfPosition } from "../types";
   import PdfPage from "./PdfPage.svelte";
 
   export let positions: PdfPosition[];
+  export let file: File;
 
   let pageContainer: HTMLDivElement;
 
@@ -23,7 +24,7 @@
     selectedOffset = [start, end];
 
     // Jump to selection
-    const [pageNumber, offset] = getPageNumber(start);
+    const [pageNumber, _] = getPageNumber(start);
     pageContainer.children[pageNumber].scrollIntoView();
   }
 </script>
@@ -34,7 +35,7 @@
     class="absolute left-0 top-0 right-0 bottom-0 bg-gray-500 w-full h-full overflow-auto"
   >
     {#each positions as position, pageNumber}
-      <PdfPage {pageNumber} {position} {selectedOffset} />
+      <PdfPage {file} {pageNumber} {position} {selectedOffset} />
     {/each}
   </div>
 </div>

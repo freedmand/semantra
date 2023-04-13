@@ -1,6 +1,6 @@
 <script lang="ts">
   import { inview, type Options } from "svelte-inview";
-  import type { Offset, PdfPosition } from "../types";
+  import type { File, Offset, PdfPosition } from "../types";
   import PdfPageImage from "./PdfPageImage.svelte";
   import PdfChars from "./PdfChars.svelte";
 
@@ -8,6 +8,7 @@
     rootMargin: "50px",
   };
 
+  export let file: File;
   export let position: PdfPosition;
   export let pageNumber: number;
   export let selectedOffset: Offset | null;
@@ -32,7 +33,7 @@
   style="width: {position.page_width}px; height: {position.page_height}px;"
 >
   {#if isInView && isInViewForEnoughTime}
-    <PdfPageImage {pageNumber} scales={[0.25, 2]} />
-    <PdfChars {position} {pageNumber} {selectedOffset} />
+    <PdfPageImage {file} {pageNumber} scales={[0.25, 2]} />
+    <PdfChars {file} {position} {pageNumber} {selectedOffset} />
   {/if}
 </div>

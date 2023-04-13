@@ -1,11 +1,16 @@
 <script lang="ts">
+  import type { File } from "../types";
+
+  export let file: File;
   export let pageNumber: number;
   export let scales: number[];
 
   let scaleIndex = 0;
 
   function getSrc(scale: number) {
-    return `/api/pdfpage?page=${pageNumber}&scale=${scale}`;
+    return `/api/pdfpage?filename=${encodeURIComponent(
+      file.filename
+    )}&page=${pageNumber}&scale=${scale}`;
   }
 
   function handleLoad() {

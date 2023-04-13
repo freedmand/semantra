@@ -202,118 +202,61 @@ TRANSFORMER_POOL_DEFAULT = 15000
 TRANSFORMER_WINDOW_TOKEN_LIMIT_DEFAULT = 128
 
 
-@click.command()
-@click.argument("filename", type=click.Path(exists=True), required=True)
-@click.option(
-    "--model",
-    type=click.Choice(models.keys(), case_sensitive=True),
-    default="mpnet",
-    help="Preset model to use for embedding",
-)
-@click.option(
-    "--transformer-model",
-    type=str,
-    help="Custom Huggingface transformers model name to use for embedding (if set, you must set --num-dimensions and possibly --window-token-limit)",
-)
-@click.option(
-    "--max-window-tokens",
-    type=int,
-    default=128,
-    help="Maximum window size for embedding tokens (default 128)",
-)
-@click.option(
-    "--min-window-tokens",
-    type=int,
-    default=8,
-    help="Minimum window size for embedding tokens (default 8)",
-)
-@click.option(
-    "--divide-factor",
-    type=int,
-    default=4,
-    help="Recursive factor to divide window size by (default 4)",
-)
-@click.option(
-    "--use-offset",
-    type=bool,
-    default=True,
-    help="Whether to use an offsetted window when embedding (default true)",
-)
-@click.option(
-    "--pool-size",
-    type=int,
-    default=None,
-    help="Max number of embedding tokens to pool together in requests",
-)
-@click.option(
-    "--pool-count",
-    type=int,
-    default=None,
-    help="Max number of embeddings to pool together in requests",
-)
-@click.option(
-    "--num-dimensions",
-    type=int,
-    default=None,
-    help="Number of dimensions for embeddings to use with --transformer-model",
-)
-@click.option(
-    "--window-token-limit",
-    type=int,
-    default=None,
-    help="Maximum number of tokens the model can meaningfully embed at once with --transformer-model (default: 128)",
-)
-@click.option(
-    "--semantra-dir",
-    type=click.Path(exists=False),
-    default=None,
-    help="Directory to store semantra files in",
-)
-def get_embeddings(
+class Document:
+    def __init__(
+        self,
+        filename,
+        semantra_dir,
+        base_filename,
+        config,
+        database_filenames,
+        windows,
+        window_indices,
+        offsets,
+        tokens_filename,
+    ):
+        self.filename = filename
+        self.semantra_dir = semantra_dir
+        self.base_filename = base_filename
+        self.config = config
+        self.database_filenames = database_filenames
+        self.windows = windows
+        self.window_indices = window_indices
+        self.offsets = offsets
+        self.tokens_filename = tokens_filename
+
+    @property
+    def content(self):
+        return get_text_content(self.filename, self.semantra_dir, self.base_filename)
+
+    @property
+    def text_chunks(self):
+        with open(self.tokens_filename, "r") as f:
+            return json.loads(f.read())
+
+    @property
+    def embeddings_dbs(self):
+        return load_saved_embeddings_dbs(
+            self.database_filenames, self.config["num_dimensions"]
+        )
+
+
+def process(
     filename,
-    max_window_tokens=128,
-    min_window_tokens=8,
-    divide_factor=4,
-    use_offset=True,
-    pool_size=None,
-    pool_count=None,
-    num_dimensions=None,
-    window_token_limit=None,
-    model="mpnet",
-    transformer_model=None,
-    get_text_content=get_text_content,
-    get_embeddings_dbs=get_embeddings_dbs,
-    load_saved_embeddings_dbs=load_saved_embeddings_dbs,
-    semantra_dir=None,  # auto
+    semantra_dir,
+    model,
+    model_params,
+    num_dimensions,
+    max_window_tokens,
+    min_window_tokens,
+    divide_factor,
+    use_offset,
+    cost_per_token,
+    window_token_limit,
+    pool_count,
+    pool_size,
 ):
-    if transformer_model is not None:
-        # Handle custom transformers model
-        if num_dimensions is None:
-            raise ValueError("Must set --num-dimensions when using --transformer-model")
-        if pool_size is None:
-            pool_size = TRANSFORMER_POOL_DEFAULT
-        if window_token_limit is None:
-            window_token_limit = TRANSFORMER_WINDOW_TOKEN_LIMIT_DEFAULT
-
-        model_params = {
-            "type": "transformers",
-            "model_name": transformer_model,
-        }
-        cost_per_token = None
-        model = TransformerModel(transformer_model)
-    else:
-        # Pull preset model
-        model_config = models[model]
-        num_dimensions = model_config["num_dimensions"]
-        cost_per_token = model_config["cost_per_token"]
-        window_token_limit = model_config["window_token_limit"]
-        model_params = model_config["params"]
-        if pool_size is None:
-            pool_size = model_config["pool_size"]
-        if pool_count is None:
-            pool_count = model_config.get("pool_count", None)
-        model: BaseModel = model_config["get_model"]()
-
+    print("Processing", filename)
     if semantra_dir is None:
         semantra_dir = os.path.join(os.path.dirname(filename), ".semantra")
 
@@ -499,9 +442,170 @@ def get_embeddings(
             flush_pool()
 
         # Write embeddings db
-        embeddings_dbs = get_embeddings_dbs(
-            database_filenames, num_dimensions, windows, window_indices, embeddings
+        get_embeddings_dbs(
+            filenames=database_filenames,
+            num_dimensions=num_dimensions,
+            windows=windows,
+            window_indices=window_indices,
+            embeddings=embeddings,
         )
+
+    return Document(
+        filename=filename,
+        semantra_dir=semantra_dir,
+        base_filename=base_filename,
+        config=full_config,
+        database_filenames=database_filenames,
+        windows=windows,
+        window_indices=window_indices,
+        offsets=offsets,
+        tokens_filename=tokens_filename,
+    )
+
+
+@click.command()
+@click.argument("filename", type=click.Path(exists=True), required=True, nargs=-1)
+@click.option(
+    "--model",
+    type=click.Choice(models.keys(), case_sensitive=True),
+    default="mpnet",
+    help="Preset model to use for embedding",
+)
+@click.option(
+    "--transformer-model",
+    type=str,
+    help="Custom Huggingface transformers model name to use for embedding (if set, you must set --num-dimensions and possibly --window-token-limit)",
+)
+@click.option(
+    "--max-window-tokens",
+    type=int,
+    default=128,
+    help="Maximum window size for embedding tokens (default 128)",
+)
+@click.option(
+    "--min-window-tokens",
+    type=int,
+    default=8,
+    help="Minimum window size for embedding tokens (default 8)",
+)
+@click.option(
+    "--divide-factor",
+    type=int,
+    default=4,
+    help="Recursive factor to divide window size by (default 4)",
+)
+@click.option(
+    "--use-offset",
+    type=bool,
+    default=True,
+    help="Whether to use an offsetted window when embedding (default true)",
+)
+@click.option(
+    "--pool-size",
+    type=int,
+    default=None,
+    help="Max number of embedding tokens to pool together in requests",
+)
+@click.option(
+    "--pool-count",
+    type=int,
+    default=None,
+    help="Max number of embeddings to pool together in requests",
+)
+@click.option(
+    "--num-dimensions",
+    type=int,
+    default=None,
+    help="Number of dimensions for embeddings to use with --transformer-model",
+)
+@click.option(
+    "--window-token-limit",
+    type=int,
+    default=None,
+    help="Maximum number of tokens the model can meaningfully embed at once with --transformer-model (default: 128)",
+)
+@click.option(
+    "--semantra-dir",
+    type=click.Path(exists=False),
+    default=None,
+    help="Directory to store semantra files in",
+)
+def get_embeddings(
+    filename,
+    max_window_tokens=128,
+    min_window_tokens=8,
+    divide_factor=4,
+    use_offset=True,
+    pool_size=None,
+    pool_count=None,
+    num_dimensions=None,
+    window_token_limit=None,
+    model="mpnet",
+    transformer_model=None,
+    semantra_dir=None,  # auto
+):
+    if transformer_model is not None:
+        # Handle custom transformers model
+        if num_dimensions is None:
+            raise ValueError("Must set --num-dimensions when using --transformer-model")
+        if pool_size is None:
+            pool_size = TRANSFORMER_POOL_DEFAULT
+        if window_token_limit is None:
+            window_token_limit = TRANSFORMER_WINDOW_TOKEN_LIMIT_DEFAULT
+
+        model_params = {
+            "type": "transformers",
+            "model_name": transformer_model,
+        }
+        cost_per_token = None
+        model = TransformerModel(transformer_model)
+    else:
+        # Pull preset model
+        model_config = models[model]
+        num_dimensions = model_config["num_dimensions"]
+        cost_per_token = model_config["cost_per_token"]
+        window_token_limit = model_config["window_token_limit"]
+        model_params = model_config["params"]
+        if pool_size is None:
+            pool_size = model_config["pool_size"]
+        if pool_count is None:
+            pool_count = model_config.get("pool_count", None)
+        model: BaseModel = model_config["get_model"]()
+
+    documents = {
+        fn: process(
+            fn,
+            semantra_dir,
+            model,
+            model_params,
+            num_dimensions,
+            max_window_tokens,
+            min_window_tokens,
+            divide_factor,
+            use_offset,
+            cost_per_token,
+            window_token_limit,
+            pool_count,
+            pool_size,
+        )
+        for fn in filename
+    }
+
+    cached_content = None
+    cached_content_filename = None
+
+    def get_content(filename):
+        nonlocal cached_content, cached_content_filename
+        # Check if we can pull from cache
+        if filename == cached_content_filename:
+            return cached_content
+        # If not, grab content
+        content = documents[filename].content
+        # Cache the content
+        cached_content_filename = filename
+        cached_content = content
+        # Return the now-cached content
+        return content
 
     # Start a Flask server
     app = Flask(__name__)
@@ -515,31 +619,52 @@ def get_embeddings(
     def home(path):
         return send_from_directory("client/public", path)
 
+    @app.route("/api/files", methods=["GET"])
+    def files():
+        return jsonify(
+            [
+                {
+                    "basename": doc.base_filename,
+                    "filename": doc.filename,
+                    "filetype": doc.content.filetype,
+                }
+                for doc in documents.values()
+            ]
+        )
+
     @app.route("/api/query", methods=["POST"])
     def query():
         query = request.json["query"]
         query_embedding = model.embed_query(query)
         print("QUERY EMBEDDING", query_embedding[:10])
         results = []
-        for i, [index, distance] in enumerate(
-            zip(*embeddings_dbs[0].get_nns_by_vector(query_embedding, 10, -1, True))
-        ):
-            offset = offsets[index]
-            text = join_text_chunks(text_chunks[offset[0] : offset[1]])
-            results.append({"text": text, "distance": distance, "offset": offset})
+        for doc in documents.values():
+            embeddings_dbs = doc.embeddings_dbs
+            text_chunks = doc.text_chunks
+            offsets = doc.offsets
+            sub_results = []
+            for i, [index, distance] in enumerate(
+                zip(*embeddings_dbs[0].get_nns_by_vector(query_embedding, 10, -1, True))
+            ):
+                offset = offsets[index]
+                text = join_text_chunks(text_chunks[offset[0] : offset[1]])
+                sub_results.append(
+                    {"text": text, "distance": distance, "offset": offset}
+                )
+            results.append([doc.filename, sub_results])
         return jsonify(results)
-
-    @app.route("/api/filetype", methods=["GET"])
-    def filetype():
-        return jsonify(content.filetype)
 
     @app.route("/api/getfile", methods=["GET"])
     def getfile():
+        filename = request.args.get("filename")
+        content = get_content(filename)
         filename = content.filename
         return send_file(filename)
 
     @app.route("/api/pdfpositions", methods=["GET"])
     def pdfpositions():
+        filename = request.args.get("filename")
+        content = get_content(filename)
         if content.filetype == "pdf":
             return jsonify(content.positions)
         else:
@@ -547,6 +672,8 @@ def get_embeddings(
 
     @app.route("/api/pdfpage", methods=["GET"])
     def pdfpage():
+        filename = request.args.get("filename")
+        content = get_content(filename)
         page = request.args.get("page")
         scale = request.args.get("scale")
         if content.filetype == "pdf":
@@ -562,6 +689,8 @@ def get_embeddings(
 
     @app.route("/api/pdfchars", methods=["GET"])
     def pdfchars():
+        filename = request.args.get("filename")
+        content = get_content(filename)
         if content.filetype != "pdf":
             return jsonify([])
         page = request.args.get("page")
@@ -570,7 +699,8 @@ def get_embeddings(
 
     @app.route("/api/text", methods=["GET"])
     def text():
-        return jsonify(text_chunks)
+        filename = request.args.get("filename")
+        return jsonify(documents[filename].text_chunks)
 
     print("Running at port 8080")
     app.run(host="0.0.0.0", port=8080)

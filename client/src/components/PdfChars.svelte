@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { Offset, PdfChar, PdfPosition } from "../types";
+  import type { File, Offset, PdfChar, PdfPosition } from "../types";
 
+  export let file: File;
   export let pageNumber: number;
   export let position: PdfPosition;
   export let selectedOffset: Offset | null;
@@ -126,14 +127,17 @@
     mHeight = mBounds.height;
     containerElem.removeChild(m);
 
-    const response = await fetch(`/api/pdfchars?page=${pageNumber}`);
+    const response = await fetch(
+      `/api/pdfchars?filename=${encodeURIComponent(
+        file.filename
+      )}&page=${pageNumber}`
+    );
     chars = await response.json();
   });
 </script>
 
 <div class="absolute left-0 top-0 right-0 bottom-0" bind:this={containerElem}>
   {#each processedChars as char, offset}
-    {@const charIndex = position.char_index + offset}
     <div
       class="absolute monospace text-transparent"
       style="font-size: {baseFontSize}px; left: {char[1]
