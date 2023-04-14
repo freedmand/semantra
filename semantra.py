@@ -255,6 +255,10 @@ def process(
     window_token_limit,
     pool_count,
     pool_size,
+    doc_token_pre,
+    doc_token_post,
+    query_token_pre,
+    query_token_post,
 ):
     print("Processing", filename)
     if semantra_dir is None:
@@ -278,6 +282,10 @@ def process(
         "min_window_tokens": min_window_tokens,
         "divide_factor": divide_factor,
         "use_offset": use_offset,
+        "doc_token_pre": doc_token_pre,
+        "doc_token_post": doc_token_post,
+        "query_token_pre": query_token_pre,
+        "query_token_post": query_token_post,
         "md5": hashlib.md5(text.encode("utf-8")).hexdigest(),
     }
 
@@ -485,7 +493,7 @@ def process(
 @click.option(
     "--min-window-tokens",
     type=int,
-    default=8,
+    default=128,
     help="Minimum window size for embedding tokens (default 128)",
 )
 @click.option(
@@ -525,6 +533,30 @@ def process(
     help="Maximum number of tokens the model can meaningfully embed at once with --transformer-model (default: 128)",
 )
 @click.option(
+    "--doc-token-pre",
+    type=str,
+    default=None,
+    help="Token to prepend to each document in transformer models (default: None)",
+)
+@click.option(
+    "--doc-token-post",
+    type=str,
+    default=None,
+    help="Token to append to each document in transformer models (default: None)",
+)
+@click.option(
+    "--query-token-pre",
+    type=str,
+    default=None,
+    help="Token to prepend to each query in transformer models (default: None)",
+)
+@click.option(
+    "--query-token-post",
+    type=str,
+    default=None,
+    help="Token to append to each query in transformer models (default: None)",
+)
+@click.option(
     "--semantra-dir",
     type=click.Path(exists=False),
     default=None,
@@ -540,6 +572,10 @@ def get_embeddings(
     pool_count=None,
     num_dimensions=None,
     window_token_limit=None,
+    doc_token_pre=None,
+    doc_token_post=None,
+    query_token_pre=None,
+    query_token_post=None,
     model="mpnet",
     transformer_model=None,
     semantra_dir=None,  # auto
@@ -555,7 +591,13 @@ def get_embeddings(
 
         model_params = {"type": "transformers", "model_name": transformer_model}
         cost_per_token = None
-        model = TransformerModel(transformer_model)
+        model = TransformerModel(
+            transformer_model,
+            doc_token_pre=doc_token_pre,
+            doc_token_post=doc_token_post,
+            query_token_pre=query_token_pre,
+            query_token_post=query_token_post,
+        )
     else:
         # Pull preset model
         model_config = models[model]
@@ -584,6 +626,10 @@ def get_embeddings(
             window_token_limit,
             pool_count,
             pool_size,
+            doc_token_pre,
+            doc_token_post,
+            query_token_pre,
+            query_token_post,
         )
         for fn in filename
     }
