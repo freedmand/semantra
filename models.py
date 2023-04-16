@@ -2,6 +2,7 @@ import torch
 from abc import ABC, abstractmethod
 from transformers import AutoTokenizer, AutoModel
 import tiktoken
+import numpy as np
 import openai
 from dotenv import load_dotenv
 import os
@@ -14,6 +15,8 @@ if "OPENAI_API_KEY" in os.environ:
 
 minilm_model_name = "sentence-transformers/all-MiniLM-L6-v2"
 mpnet_model_name = "sentence-transformers/all-mpnet-base-v2"
+sgpt_model_name = "Muennighoff/SGPT-125M-weightedmean-msmarco-specb-bitfit"
+sgpt_1_3B_model_name = "Muennighoff/SGPT-1.3B-weightedmean-msmarco-specb-bitfit"
 
 
 def mean_pooling(model_output, attention_mask):
@@ -28,7 +31,22 @@ def mean_pooling(model_output, attention_mask):
     return sum_embeddings / sum_mask
 
 
+def filter_none(x):
+    return [i for i in x if i is not None]
+
+
+def as_numpy(x):
+    # If x is a tensor, convert it to a numpy array
+    if isinstance(x, torch.Tensor):
+        return x.numpy()
+    return x
+
+
 class BaseModel(ABC):
+    @abstractmethod
+    def get_num_dimensions(self) -> int:
+        ...
+
     @abstractmethod
     def get_tokens(self, text: str):
         ...
@@ -49,13 +67,31 @@ class BaseModel(ABC):
         tokens = self.get_tokens(query)
         return self.embed(tokens, [(0, self.get_token_length(tokens))], True)[0]
 
+    def embed_queries(self, queries) -> "list[float]":
+        all_embeddings = [
+            as_numpy(self.embed_query(query["query"])) * query["weight"]
+            for query in queries
+        ]
+        # Return sum of embeddings
+        return np.sum(all_embeddings, axis=0)
+
+    def is_asymmetric(self):
+        return False
+
 
 class OpenAIModel(BaseModel):
     def __init__(
-        self, model_name="text-embedding-ada-002", tokenizer_name="cl100k_base"
+        self,
+        model_name="text-embedding-ada-002",
+        num_dimensions=1536,
+        tokenizer_name="cl100k_base",
     ):
         self.model_name = model_name
+        self.num_dimensions = num_dimensions
         self.tokenizer = tiktoken.get_encoding(tokenizer_name)
+
+    def get_num_dimensions(self) -> int:
+        return self.num_dimensions
 
     def get_tokens(self, text: str):
         return self.tokenizer.encode(text)
@@ -66,10 +102,10 @@ class OpenAIModel(BaseModel):
     def get_text_chunks(self, _: str, tokens) -> "list[str]":
         return [self.tokenizer.decode([token]) for token in tokens]
 
-    def embed(self, tokens, offsets) -> "list[list[float]]":
+    def embed(self, tokens, offsets, _is_query=False) -> "list[list[float]]":
         texts = [tokens[i:j] for i, j in offsets]
         response = openai.Embedding.create(model=self.model_name, input=texts)
-        return [data["embedding"] for data in response["data"]]
+        return np.array([data["embedding"] for data in response["data"]])
 
 
 def zero_if_none(x):
@@ -84,6 +120,7 @@ class TransformerModel(BaseModel):
         doc_token_post=None,
         query_token_pre=None,
         query_token_post=None,
+        asymmetric=False,
         cuda=None,
     ):
         if cuda is None:
@@ -96,27 +133,35 @@ class TransformerModel(BaseModel):
         self.doc_token_pre = (
             self.tokenizer.encode(doc_token_pre, add_special_tokens=False)
             if doc_token_pre
-            else []
+            else None
         )
         self.doc_token_post = (
             self.tokenizer.encode(doc_token_post, add_special_tokens=False)
             if doc_token_post
-            else []
+            else None
         )
         self.query_token_pre = (
             self.tokenizer.encode(query_token_pre, add_special_tokens=False)
             if query_token_pre
-            else []
+            else None
         )
         self.query_token_post = (
             self.tokenizer.encode(query_token_post, add_special_tokens=False)
             if query_token_post
-            else []
+            else None
         )
+
+        self.asymmetric = asymmetric
 
         self.cuda = cuda
         if self.cuda:
             self.model = self.model.cuda()
+
+    def is_asymmetric(self):
+        return self.asymmetric
+
+    def get_num_dimensions(self) -> int:
+        return int(self.model.config.hidden_size)
 
     def get_tokens(self, text: str):
         return self.tokenizer(
@@ -147,39 +192,35 @@ class TransformerModel(BaseModel):
         return chunks
 
     def normalize_input_ids(self, input_ids, is_query):
-        if is_query:
-            return torch.cat(
-                [
-                    torch.tensor(self.query_token_pre),
-                    input_ids,
-                    torch.tensor(self.query_token_post),
-                ]
-            )
+        if self.query_token_pre is None and self.query_token_post is None:
+            return input_ids
         else:
+            token_pre = self.query_token_pre if is_query else self.doc_token_pre
+            token_post = self.query_token_post if is_query else self.doc_token_post
             return torch.cat(
-                [
-                    torch.tensor(self.doc_token_pre),
-                    input_ids,
-                    torch.tensor(self.doc_token_post),
-                ]
+                filter_none(
+                    [
+                        torch.tensor(token_pre) if token_pre is not None else None,
+                        input_ids,
+                        torch.tensor(token_post) if token_post is not None else None,
+                    ]
+                )
             )
 
     def normalize_attention_mask(self, attention_mask, is_query):
-        if is_query:
-            return torch.cat(
-                [
-                    torch.ones(len(self.query_token_pre)),
-                    attention_mask,
-                    torch.ones(len(self.query_token_post)),
-                ]
-            )
+        if self.query_token_pre is None and self.query_token_post is None:
+            return attention_mask
         else:
+            token_pre = self.query_token_pre if is_query else self.doc_token_pre
+            token_post = self.query_token_post if is_query else self.doc_token_post
             return torch.cat(
-                [
-                    torch.ones(len(self.doc_token_pre)),
-                    attention_mask,
-                    torch.ones(len(self.doc_token_post)),
-                ]
+                filter_none(
+                    [
+                        torch.ones(len(token_pre)) if token_pre is not None else None,
+                        attention_mask,
+                        torch.ones(len(token_post)) if token_post is not None else None,
+                    ]
+                )
             )
 
     def embed(self, tokens, offsets, is_query=False) -> "list[list[float]]":
@@ -214,35 +255,57 @@ class TransformerModel(BaseModel):
             model_output = self.model(
                 input_ids=input_ids, attention_mask=attention_mask
             )
-        return mean_pooling(model_output, attention_mask).tolist()
+        return mean_pooling(model_output, attention_mask)
 
 
 models = {
     "openai": {
         "params": {"type": "openai", "model_name": "text-embedding-ada-002"},
-        "num_dimensions": 1536,
         "cost_per_token": 0.0004 / 1000,
-        "window_token_limit": 7900,  # technically 8192 but sometimes tiktoken gives an inaccurate count
         "pool_size": 50000,
         "pool_count": 2000,
         "get_model": lambda: OpenAIModel(
-            model_name="text-embedding-ada-002", tokenizer_name="cl100k_base"
+            model_name="text-embedding-ada-002",
+            num_dimensions=1536,
+            tokenizer_name="cl100k_base",
         ),
     },
     "minilm": {
         "params": {"type": "transformers", "model_name": minilm_model_name},
-        "num_dimensions": 384,
         "cost_per_token": None,
-        "window_token_limit": 128,
         "pool_size": 50000,
         "get_model": lambda: TransformerModel(model_name=minilm_model_name),
     },
     "mpnet": {
         "params": {"type": "transformers", "model_name": mpnet_model_name},
-        "num_dimensions": 768,
         "cost_per_token": None,
-        "window_token_limit": 128,
         "pool_size": 15000,
         "get_model": lambda: TransformerModel(model_name=mpnet_model_name),
+    },
+    "sgpt": {
+        "params": {"type": "transformers", "model_name": sgpt_model_name},
+        "cost_per_token": None,
+        "pool_size": 10000,
+        "get_model": lambda: TransformerModel(
+            model_name=sgpt_model_name,
+            query_token_pre="[",
+            query_token_post="]",
+            doc_token_pre="{",
+            doc_token_post="}",
+            asymmetric=True,
+        ),
+    },
+    "sgpt-1.3B": {
+        "params": {"type": "transformers", "model_name": sgpt_1_3B_model_name},
+        "cost_per_token": None,
+        "pool_size": 1000,
+        "get_model": lambda: TransformerModel(
+            model_name=sgpt_1_3B_model_name,
+            query_token_pre="[",
+            query_token_post="]",
+            doc_token_pre="{",
+            doc_token_post="}",
+            asymmetric=True,
+        ),
     },
 }

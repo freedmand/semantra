@@ -4,12 +4,13 @@
   import TextView from "./components/TextView.svelte";
   import Tailwindcss from "./Tailwind.svelte";
   import SearchBar from "./components/SearchBar.svelte";
-  import type {
-    File,
-    Navigation,
-    PdfPosition,
-    SearchResult,
-    SearchResultSet,
+  import {
+    type File,
+    type Navigation,
+    type PdfPosition,
+    type SearchResultSet,
+    type Preference,
+    preferenceKey,
   } from "./types";
   import PdfView from "./components/PdfView.svelte";
   import TabBar from "./components/TabBar.svelte";
@@ -20,6 +21,8 @@
   let text: string | null = null;
   let pdfPositions: PdfPosition[] = [];
   let updating = false;
+
+  let preferences: { [key: string]: Preference } = {};
 
   $: activeFile =
     activeFileIndex < files.length ? files[activeFileIndex] : null;
@@ -68,15 +71,72 @@
   let pdfView: PdfView;
 
   async function handleSearch(query: string) {
+    console.log("SEARCHING");
+    const preferenceValues = Object.values(preferences)
+      .filter((preference) => preference.weight !== 0)
+      .map((x) => ({ ...x }));
+
     // Ignore empty queries
-    if (query.trim() === "") return;
+    if (query.trim() === "" && preferenceValues.length === 0) return;
+
+    // Parse the query
+    // e.g. "dog + cat" => [{query: "dog", weight: 1}, {query: "cat", weight: 1}]
+    // e.g. "dog - cat" => [{query: "dog", weight: 1}, {query: "cat", weight: -1}]
+    // e.g. "dog is cool - cat" => [{query: "dog is cool", weight: 1}, {query: "cat", weight: -1}]
+    // e.g. "dog +1.2 cat" => [{query: "dog", weight: 1}, {query: "cat", weight: 1.2}]
+    // e.g. "+3 dogs are nice -2 cats are mean" => [{query: "dogs are nice", weight: 3}, {query: "cats are mean", weight: 2}]
+    // Parse the query
+    const regex = /([\+\-]?\d*\.?\d*\s*)?([^\+\-]+)/g;
+    const parsedQueries: { query: string; weight: number }[] = [];
+
+    let match;
+    while ((match = regex.exec(query)) !== null) {
+      const weight =
+        parseFloat(match[1]) || (match[1] && match[1].includes("-") ? -1 : 1);
+      const searchTerm = match[2].trim();
+      parsedQueries.push({ query: searchTerm, weight });
+    }
+
+    // Adjust weights so that all positive weights are split evenly
+    // and all negative weights are split evenly, and the sum of all
+    // weights is 1
+    const POSITIVE_RATIO = 0.61803398875;
+    const NEGATIVE_RATIO = 1 - POSITIVE_RATIO;
+
+    const totalPositiveCount =
+      parsedQueries.filter((query) => query.weight > 0).length +
+      preferenceValues.filter((preference) => preference.weight > 0).length;
+    const totalNegativeCount =
+      parsedQueries.filter((query) => query.weight < 0).length +
+      preferenceValues.filter((preference) => preference.weight < 0).length;
+    for (const query of parsedQueries) {
+      if (query.weight > 0) {
+        query.weight *= POSITIVE_RATIO / totalPositiveCount;
+      } else if (query.weight < 0) {
+        query.weight *= NEGATIVE_RATIO / totalNegativeCount;
+      }
+    }
+    for (const preference of preferenceValues) {
+      if (preference.weight > 0) {
+        preference.weight *= POSITIVE_RATIO / totalPositiveCount;
+      } else if (preference.weight < 0) {
+        preference.weight *= NEGATIVE_RATIO / totalNegativeCount;
+      }
+    }
 
     const response = await fetch("/api/query", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({
+        queries: parsedQueries,
+        preferences: preferenceValues.map((preference) => ({
+          filename: preference.file.filename,
+          index: preference.searchResult.index,
+          weight: preference.weight,
+        })),
+      }),
     });
     searchResultSet = await response.json();
   }
@@ -122,6 +182,11 @@
       navigate();
     }
   }
+
+  function setPreference(preference: Preference) {
+    preferences[preferenceKey(preference.file, preference.searchResult)] =
+      preference;
+  }
 </script>
 
 <Tailwindcss />
@@ -129,10 +194,16 @@
 <main class="flex flex-col h-full bg-slate-100">
   <header class="flex flex-row items-center border-b-4 border-black py-4 px-8">
     <h1 class="text-3xl font-mono font-bold inline-flex pr-6">Semantra</h1>
-    <SearchBar on:search={(e) => handleSearch(e.detail)} />
+    <SearchBar
+      {preferences}
+      on:setPreference={(e) => setPreference(e.detail)}
+      on:search={(e) => handleSearch(e.detail)}
+    />
   </header>
   <article class="flex flex-1 flex-row relative items-stretch">
     <SearchResults
+      {preferences}
+      on:setPreference={(e) => setPreference(e.detail)}
       on:navigate={(e) => jumpToResult(e.detail)}
       {filesByPath}
       {searchResultSet}

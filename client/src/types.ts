@@ -12,6 +12,17 @@ export interface SearchResult {
   distance: number;
   text: string;
   offset: [number, number];
+  index: number;
+}
+
+export interface Preference {
+  file: File;
+  searchResult: SearchResult;
+  weight: -1 | 0 | 1;
+}
+
+export function preferenceKey(file: File, searchResult: SearchResult): string {
+  return JSON.stringify([file.filename, searchResult.index]);
 }
 
 export interface Navigation {

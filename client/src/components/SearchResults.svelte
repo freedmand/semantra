@@ -1,13 +1,34 @@
 <script lang="ts">
-  import type { File, SearchResult, SearchResultSet } from "../types";
+  import {
+    preferenceKey,
+    type File,
+    type Preference,
+    type SearchResult,
+    type SearchResultSet,
+  } from "../types";
   import { createEventDispatcher } from "svelte";
   const dispatch = createEventDispatcher();
 
   export let searchResultSet: SearchResultSet;
   export let filesByPath: { [path: string]: File };
+  export let preferences: { [key: string]: Preference };
 
   function jumpToResult(file: File, searchResult: SearchResult) {
     dispatch("navigate", { file, searchResult });
+  }
+
+  function setPreference(
+    e: Event,
+    file: File,
+    searchResult: SearchResult,
+    weight: number
+  ) {
+    dispatch("setPreference", {
+      file,
+      searchResult,
+      weight,
+    });
+    e.stopPropagation();
   }
 </script>
 
@@ -26,12 +47,44 @@
         <ul class="-mt-2">
           {#each searchResults as searchResult}
             <!-- svelte-ignore a11y-click-events-have-key-events -->
+            {@const prefKey = preferenceKey(file, searchResult)}
+            {@const preference = preferences[prefKey] || {
+              file,
+              searchResult,
+              weight: 0,
+            }}
             <li
               on:click={() => jumpToResult(file, searchResult)}
-              class="font-mono text-sm border-b last:border-0 py-4 px-4 border-black"
+              class="font-mono text-sm border-b last:border-0 py-4 px-4 border-black pointer"
             >
               <span class="text-xs bg-blue-100 px-1 rounded"
                 >{searchResult.distance.toFixed(2)}</span
+              >
+              <button
+                class="bg-gray-300 rounded px-2"
+                class:bg-blue-200={preference.weight > 0}
+                class:text-blue-600={preference.weight > 0}
+                class:font-bold={preference.weight > 0}
+                on:click={(e) =>
+                  setPreference(
+                    e,
+                    file,
+                    searchResult,
+                    preference.weight > 0 ? 0 : 1
+                  )}>+</button
+              >
+              <button
+                class="bg-gray-300 rounded px-2"
+                class:bg-orange-200={preference.weight < 0}
+                class:text-orange-500={preference.weight < 0}
+                class:font-bold={preference.weight < 0}
+                on:click={(e) =>
+                  setPreference(
+                    e,
+                    file,
+                    searchResult,
+                    preference.weight < 0 ? 0 : -1
+                  )}>-</button
               >
               {searchResult.text}
             </li>

@@ -3,15 +3,13 @@ import json
 import os
 import struct
 import tqdm
+import numpy as np
 from annoy import AnnoyIndex
 from flask import Flask, request, jsonify, send_from_directory, send_file, make_response
 import click
 from models import models, BaseModel, TransformerModel
-import pypdfium2 as pdfium
 import io
-from multiprocessing import Lock
-
-mutex = Lock()
+from pdf import get_pdf_content
 
 
 def join_text_chunks(chunks):
@@ -56,75 +54,11 @@ def safe_remove(filename):
         pass
 
 
-def file_md5(filename):
-    hash_md5 = hashlib.md5()
-    with open(filename, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()[:10]
-
-
 class Content:
     def __init__(self, rawtext, filename):
         self.rawtext = rawtext
         self.filename = filename
         self.filetype = "text"
-
-
-class PDFContent:
-    def __init__(self, rawtext, filename, positions, pdf):
-        self.rawtext = rawtext
-        self.filename = filename
-        self.positions = positions
-        self.pdf = pdf
-        self.pdfium = pdfium.PdfDocument(filename)
-        self.filetype = "pdf"
-
-    def __del__(self):
-        self.pdf.close()
-
-
-def get_pdf_content(filename, semantra_dir, base_filename):
-    hash = file_md5(filename)
-    converted_txt = os.path.join(semantra_dir, base_filename + f".{hash}.txt")
-    position_index = os.path.join(
-        semantra_dir, base_filename + f".{hash}.positions.json"
-    )
-
-    import pdfplumber
-
-    pdf = pdfplumber.open(filename)
-
-    if not os.path.exists(converted_txt) or not os.path.exists(position_index):
-        positions = []
-        position = 0
-        with open(converted_txt, "w", encoding="utf-8", errors="ignore") as f:
-            for page in tqdm.tqdm(pdf.pages, desc="Extracting PDF contents"):
-                page_width = page.width
-                page_height = page.height
-                textmap = page.get_textmap()
-                pagetext = "".join([tuple[0] for tuple in textmap.tuples])
-                positions.append(
-                    {
-                        "char_index": position,
-                        "page_width": page_width,
-                        "page_height": page_height,
-                    }
-                )
-                position += f.write(pagetext)
-                position += f.write("\f")
-        with open(position_index, "w") as f:
-            json.dump(positions, f)
-        with open(converted_txt, "r") as f:
-            rawtext = f.read()
-        return PDFContent(rawtext, filename, positions, pdf)
-    else:
-        with open(converted_txt, "r", encoding="utf-8", errors="ignore") as f:
-            rawtext = f.read()
-        with open(position_index, "r") as f:
-            positions = json.load(f)
-
-        return PDFContent(rawtext, filename, positions, pdf)
 
 
 def get_text_content(filename, semantra_dir, base_filename):
@@ -198,8 +132,51 @@ def get_binary_embedding_offsets(
     return offsets, windows, window_indices, num_tokens
 
 
+def read_embeddings_file_old(embeddings_filename, num_dimensions):
+    embeddings = []
+    with open(embeddings_filename, "rb") as f:
+        while True:
+            chunk = f.read(num_dimensions * 4)
+            if not chunk:
+                break
+            embeddings.append(read_embedding(chunk, num_dimensions))
+    return embeddings
+
+
+def read_embeddings_file(embeddings_filename, num_dimensions, capacity):
+    # Get the file size
+    with open(embeddings_filename, "rb") as f:
+        f.seek(0, 2)
+        file_size = f.tell()
+
+    # Calculate the number of embeddings
+    num_embeddings = file_size // (num_dimensions * 4)
+
+    # Change the file size to the expected size
+    with open(embeddings_filename, "ab") as f:
+        f.truncate(num_embeddings * num_dimensions * 4)
+
+    if num_embeddings == 0:
+        return np.zeros((capacity, num_dimensions), dtype="float32"), 0
+
+    # Memory map the file
+    read_embeddings = np.memmap(
+        embeddings_filename,
+        dtype="float32",
+        mode="r",
+        shape=(num_embeddings, num_dimensions),
+    )
+
+    # Create an array with shape (capacity, num_dimensions) filled with 0s
+    embeddings = np.zeros((capacity, num_dimensions), dtype="float32")
+
+    # Copy the original embeddings into the new array
+    embeddings[:num_embeddings] = read_embeddings[:num_embeddings]
+
+    return embeddings, num_embeddings
+
+
 TRANSFORMER_POOL_DEFAULT = 15000
-TRANSFORMER_WINDOW_TOKEN_LIMIT_DEFAULT = 128
 
 
 class Document:
@@ -209,6 +186,7 @@ class Document:
         semantra_dir,
         base_filename,
         config,
+        embeddings_filename,
         database_filenames,
         windows,
         window_indices,
@@ -219,6 +197,7 @@ class Document:
         self.semantra_dir = semantra_dir
         self.base_filename = base_filename
         self.config = config
+        self.embeddings_filename = embeddings_filename
         self.database_filenames = database_filenames
         self.windows = windows
         self.window_indices = window_indices
@@ -235,10 +214,26 @@ class Document:
             return json.loads(f.read())
 
     @property
+    def num_dimensions(self):
+        return self.config["num_dimensions"]
+
+    @property
+    def num_embeddings(self):
+        return len(self.offsets)
+
+    @property
     def embeddings_dbs(self):
-        return load_saved_embeddings_dbs(
-            self.database_filenames, self.config["num_dimensions"]
+        return load_saved_embeddings_dbs(self.database_filenames, self.num_dimensions)
+
+    @property
+    def embeddings(self):
+        results, embedding_count = read_embeddings_file(
+            self.embeddings_filename,
+            self.num_dimensions,
+            self.num_embeddings,
         )
+        assert embedding_count == self.num_embeddings
+        return results
 
 
 def process(
@@ -252,7 +247,6 @@ def process(
     divide_factor,
     use_offset,
     cost_per_token,
-    window_token_limit,
     pool_count,
     pool_size,
     doc_token_pre,
@@ -339,7 +333,6 @@ def process(
         "cost_per_token": cost_per_token,
         "windows": windows,
         "window_indices": window_indices,
-        "window_token_limit": window_token_limit,
         "num_tokens": num_tokens,
         "num_embeddings": len(offsets),
         "num_embedding_tokens": num_embedding_tokens,
@@ -377,12 +370,9 @@ def process(
         for database_filename in database_filenames:
             safe_remove(database_filename)
 
-    if all(
+    if not all(
         os.path.exists(database_filename) for database_filename in database_filenames
     ):
-        print("Loading embeddings dbs...")
-        embeddings_dbs = load_saved_embeddings_dbs(database_filenames, num_dimensions)
-    else:
         with open(config_filename, "w") as f:
             f.write(json.dumps(config))
 
@@ -390,19 +380,14 @@ def process(
             tokens = model.get_tokens(text)
 
         # Read embeddings if they exist
-        embeddings = []
-        try:
-            with open(embeddings_filename, "rb") as f:
-                embeddings = []
-                while True:
-                    chunk = f.read(4 * num_dimensions)
-                    if len(chunk) == 0:
-                        break
-                    embeddings.append(read_embedding(chunk, num_dimensions))
-        except FileNotFoundError:
-            pass
+        embeddings = np.empty((len(offsets), num_dimensions), dtype=np.float32)
+        embedding_index = 0
+        if os.path.exists(embeddings_filename):
+            embeddings, embedding_index = read_embeddings_file(
+                embeddings_filename, num_dimensions, len(offsets)
+            )
 
-        num_skip = len(embeddings)
+        num_skip = embedding_index
         iteration = 0
 
         # Write embeddings
@@ -410,16 +395,16 @@ def process(
         pool_token_count = 0
 
         def flush_pool():
-            nonlocal pool
-            nonlocal pool_token_count
-            nonlocal embeddings
-            nonlocal f
+            nonlocal pool, pool_token_count, embeddings, embedding_index, f
 
             if len(pool) > 0:
                 embedding_results = model.embed(tokens, pool)
-                embeddings += embedding_results
+                embeddings[
+                    embedding_index : embedding_index + len(pool)
+                ] = embedding_results
                 for embedding in embedding_results:
                     write_embedding(f, embedding, num_dimensions)
+                embedding_index += len(pool)
                 pool = []
                 pool_token_count = 0
 
@@ -463,6 +448,7 @@ def process(
         semantra_dir=semantra_dir,
         base_filename=base_filename,
         config=full_config,
+        embeddings_filename=embeddings_filename,
         database_filenames=database_filenames,
         windows=windows,
         window_indices=window_indices,
@@ -477,36 +463,41 @@ def process(
     "--model",
     type=click.Choice(models.keys(), case_sensitive=True),
     default="mpnet",
+    show_default=True,
     help="Preset model to use for embedding",
 )
 @click.option(
     "--transformer-model",
     type=str,
-    help="Custom Huggingface transformers model name to use for embedding (if set, you must set --num-dimensions and possibly --window-token-limit)",
+    help="Custom Huggingface transformers model name to use for embedding",
 )
 @click.option(
     "--max-window-tokens",
     type=int,
     default=128,
-    help="Maximum window size for embedding tokens (default 128)",
+    show_default=True,
+    help="Maximum window size for embedding tokens",
 )
 @click.option(
     "--min-window-tokens",
     type=int,
     default=128,
-    help="Minimum window size for embedding tokens (default 128)",
+    show_default=True,
+    help="Minimum window size for embedding tokens",
 )
 @click.option(
     "--divide-factor",
     type=int,
     default=4,
-    help="Recursive factor to divide window size by (default 4)",
+    show_default=True,
+    help="Recursive factor to divide window size by",
 )
 @click.option(
     "--use-offset",
     type=bool,
     default=True,
-    help="Whether to use an offsetted window when embedding (default true)",
+    show_default=True,
+    help="Whether to use an offsetted window when embedding",
 )
 @click.option(
     "--pool-size",
@@ -519,18 +510,6 @@ def process(
     type=int,
     default=None,
     help="Max number of embeddings to pool together in requests",
-)
-@click.option(
-    "--num-dimensions",
-    type=int,
-    default=None,
-    help="Number of dimensions for embeddings to use with --transformer-model",
-)
-@click.option(
-    "--window-token-limit",
-    type=int,
-    default=None,
-    help="Maximum number of tokens the model can meaningfully embed at once with --transformer-model (default: 128)",
 )
 @click.option(
     "--doc-token-pre",
@@ -557,6 +536,23 @@ def process(
     help="Token to append to each query in transformer models (default: None)",
 )
 @click.option(
+    "--svm",
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help="Use SVM instead of kNN",
+)
+@click.option(
+    "--svm-c",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help="SVM regularization parameter; higher values penalize mispredictions more",
+)
+@click.option(
+    "--force", is_flag=True, default=False, help="Force process even if cached"
+)
+@click.option(
     "--semantra-dir",
     type=click.Path(exists=False),
     default=None,
@@ -570,24 +566,21 @@ def get_embeddings(
     use_offset=True,
     pool_size=None,
     pool_count=None,
-    num_dimensions=None,
-    window_token_limit=None,
     doc_token_pre=None,
     doc_token_post=None,
     query_token_pre=None,
     query_token_post=None,
     model="mpnet",
     transformer_model=None,
+    svm=False,
+    svm_c=1.0,
+    force=False,
     semantra_dir=None,  # auto
 ):
     if transformer_model is not None:
         # Handle custom transformers model
-        if num_dimensions is None:
-            raise ValueError("Must set --num-dimensions when using --transformer-model")
         if pool_size is None:
             pool_size = TRANSFORMER_POOL_DEFAULT
-        if window_token_limit is None:
-            window_token_limit = TRANSFORMER_WINDOW_TOKEN_LIMIT_DEFAULT
 
         model_params = {"type": "transformers", "model_name": transformer_model}
         cost_per_token = None
@@ -601,9 +594,7 @@ def get_embeddings(
     else:
         # Pull preset model
         model_config = models[model]
-        num_dimensions = model_config["num_dimensions"]
         cost_per_token = model_config["cost_per_token"]
-        window_token_limit = model_config["window_token_limit"]
         model_params = model_config["params"]
         if pool_size is None:
             pool_size = model_config["pool_size"]
@@ -611,25 +602,31 @@ def get_embeddings(
             pool_count = model_config.get("pool_count", None)
         model: BaseModel = model_config["get_model"]()
 
+    # Check if model is compatible
+    if svm and model.is_asymmetric():
+        raise ValueError(
+            "SVM is not compatible with asymmetric models. "
+            "Please use a symmetric model or kNN."
+        )
+
     documents = {
         fn: process(
-            fn,
-            semantra_dir,
-            model,
-            model_params,
-            num_dimensions,
-            max_window_tokens,
-            min_window_tokens,
-            divide_factor,
-            use_offset,
-            cost_per_token,
-            window_token_limit,
-            pool_count,
-            pool_size,
-            doc_token_pre,
-            doc_token_post,
-            query_token_pre,
-            query_token_post,
+            filename=fn,
+            semantra_dir=semantra_dir,
+            model=model,
+            model_params=model_params,
+            num_dimensions=model.get_num_dimensions(),
+            max_window_tokens=max_window_tokens,
+            min_window_tokens=min_window_tokens,
+            divide_factor=divide_factor,
+            use_offset=use_offset,
+            cost_per_token=cost_per_token,
+            pool_count=pool_count,
+            pool_size=pool_size,
+            doc_token_pre=doc_token_pre,
+            doc_token_post=doc_token_post,
+            query_token_pre=query_token_pre,
+            query_token_post=query_token_post,
         )
         for fn in filename
     }
@@ -675,24 +672,113 @@ def get_embeddings(
             ]
         )
 
-    @app.route("/api/query", methods=["POST"])
-    def query():
-        query = request.json["query"]
-        query_embedding = model.embed_query(query)
-        print("QUERY EMBEDDING", query_embedding[:10])
+    @app.route("/api/querysvm", methods=["POST"])
+    def querysvm():
+        from sklearn import svm
+
+        queries = request.json["queries"]
+        preferences = request.json["preferences"]
+
+        query_embedding = model.embed_queries(queries) if len(queries) > 0 else None
         results = []
         for doc in documents.values():
+            embeddings = doc.embeddings
+
+            # Add preferences to embeddings
+            preference_embedding = np.sum(
+                [
+                    *([query_embedding] if query_embedding is not None else []),
+                    *[
+                        documents[pref["filename"]].embeddings[pref["index"]]
+                        * pref["weight"]
+                        for pref in preferences
+                    ],
+                ],
+                axis=0,
+            )
+
+            x = np.concatenate([embeddings, preference_embedding[None, ...]])
+            y = np.zeros(len(embeddings) + 1)
+            y[-1] = 1
+
+            # Train the svm
+            clf = svm.LinearSVC(
+                class_weight="balanced",
+                verbose=False,
+                max_iter=10000,
+                tol=1e-6,
+                C=svm_c,
+            )
+            clf.fit(x, y)
+
+            # Infer similarities
+            similarities = clf.decision_function(x)[: len(embeddings)]
+            sorted_ix = np.argsort(-similarities)
+
+            text_chunks = doc.text_chunks
+            offsets = doc.offsets
+            sub_results = []
+            for i, index in enumerate(sorted_ix[:10]):
+                distance = similarities[index]
+                offset = offsets[index]
+                text = join_text_chunks(text_chunks[offset[0] : offset[1]])
+                sub_results.append(
+                    {
+                        "text": text,
+                        "distance": distance,
+                        "offset": offset,
+                        "index": int(index),
+                    }
+                )
+            results.append([doc.filename, sub_results])
+
+        return jsonify(results)
+
+    @app.route("/api/query", methods=["POST"])
+    def query():
+        queries = request.json["queries"]
+        preferences = request.json["preferences"]
+        if svm:
+            return querysvm()
+        query_embedding = model.embed_queries(queries) if len(queries) > 0 else None
+        results = []
+        print(queries)
+        print(preferences)
+        print("---")
+        for doc in documents.values():
+            # Add preferences to embeddings
+            preference_embedding = np.sum(
+                [
+                    *([query_embedding] if query_embedding is not None else []),
+                    *[
+                        documents[pref["filename"]].embeddings[pref["index"]]
+                        * pref["weight"]
+                        for pref in preferences
+                    ],
+                ],
+                axis=0,
+            )
+
             embeddings_dbs = doc.embeddings_dbs
             text_chunks = doc.text_chunks
             offsets = doc.offsets
             sub_results = []
             for i, [index, distance] in enumerate(
-                zip(*embeddings_dbs[0].get_nns_by_vector(query_embedding, 10, -1, True))
+                zip(
+                    *embeddings_dbs[0].get_nns_by_vector(
+                        preference_embedding, 10, -1, True
+                    )
+                )
             ):
                 offset = offsets[index]
                 text = join_text_chunks(text_chunks[offset[0] : offset[1]])
                 sub_results.append(
-                    {"text": text, "distance": distance, "offset": offset}
+                    {
+                        "text": text,
+                        "distance": distance,
+                        "offset": offset,
+                        "index": int(index),
+                    }
                 )
             results.append([doc.filename, sub_results])
         return jsonify(results)
@@ -720,10 +806,7 @@ def get_embeddings(
         page = request.args.get("page")
         scale = request.args.get("scale")
         if content.filetype == "pdf":
-            with mutex:
-                page = content.pdfium[int(page)]
-                bitmap = page.render(scale=float(scale))
-                pil_image = bitmap.to_pil()
+            pil_image = content.get_page_image_pil(int(page), float(scale))
             img_byte_arr = io.BytesIO()
             pil_image.save(img_byte_arr, format="PNG")
             response = make_response(img_byte_arr.getvalue())
@@ -737,8 +820,7 @@ def get_embeddings(
         if content.filetype != "pdf":
             return jsonify([])
         page = request.args.get("page")
-        textmap = content.pdf.pages[int(page)].get_textmap()
-        return jsonify(textmap.tuples)
+        return jsonify(content.get_page_chars(int(page)))
 
     @app.route("/api/text", methods=["GET"])
     def text():
