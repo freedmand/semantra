@@ -63,6 +63,10 @@ class BaseModel(ABC):
     def embed(self, tokens, offsets, is_query: bool = False) -> "list[list[float]]":
         ...
 
+    def embed_document(self, document) -> "list[float]":
+        tokens = self.get_tokens(document)
+        return self.embed(tokens, [(0, self.get_token_length(tokens))], False)[0]
+
     def embed_query(self, query: str) -> "list[float]":
         tokens = self.get_tokens(query)
         return self.embed(tokens, [(0, self.get_token_length(tokens))], True)[0]
@@ -74,6 +78,23 @@ class BaseModel(ABC):
         ]
         # Return sum of embeddings
         return np.sum(all_embeddings, axis=0)
+
+    def embed_queries_and_preferences(self, queries, preferences, documents):
+        query_embedding = self.embed_queries(queries) if len(queries) > 0 else None
+        # Add preferences to embeddings
+        return np.sum(
+            [
+                *([query_embedding] if query_embedding is not None else []),
+                *[
+                    documents[pref["file"]["filename"]].embeddings[
+                        pref["searchResult"]["index"]
+                    ]
+                    * pref["weight"]
+                    for pref in preferences
+                ],
+            ],
+            axis=0,
+        )
 
     def is_asymmetric(self):
         return False

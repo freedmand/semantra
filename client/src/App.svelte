@@ -11,6 +11,7 @@
     type SearchResultSet,
     type Preference,
     preferenceKey,
+    type ParsedQuery,
   } from "./types";
   import PdfView from "./components/PdfView.svelte";
   import TabBar from "./components/TabBar.svelte";
@@ -70,15 +71,7 @@
   let textView: TextView;
   let pdfView: PdfView;
 
-  async function handleSearch(query: string) {
-    console.log("SEARCHING");
-    const preferenceValues = Object.values(preferences)
-      .filter((preference) => preference.weight !== 0)
-      .map((x) => ({ ...x }));
-
-    // Ignore empty queries
-    if (query.trim() === "" && preferenceValues.length === 0) return;
-
+  export function parseQuery(query: string): ParsedQuery[] {
     // Parse the query
     // e.g. "dog + cat" => [{query: "dog", weight: 1}, {query: "cat", weight: 1}]
     // e.g. "dog - cat" => [{query: "dog", weight: 1}, {query: "cat", weight: -1}]
@@ -87,7 +80,7 @@
     // e.g. "+3 dogs are nice -2 cats are mean" => [{query: "dogs are nice", weight: 3}, {query: "cats are mean", weight: 2}]
     // Parse the query
     const regex = /([\+\-]?\d*\.?\d*\s*)?([^\+\-]+)/g;
-    const parsedQueries: { query: string; weight: number }[] = [];
+    const parsedQueries: ParsedQuery[] = [];
 
     let match;
     while ((match = regex.exec(query)) !== null) {
@@ -96,6 +89,22 @@
       const searchTerm = match[2].trim();
       parsedQueries.push({ query: searchTerm, weight });
     }
+
+    return parsedQueries;
+  }
+
+  async function handleSearch(query: string) {
+    const preferenceValues = Object.values(preferences)
+      .filter((preference) => preference.weight !== 0)
+      .map((x) => ({ ...x }));
+
+    // Ignore empty queries
+    if (query.trim() === "" && preferenceValues.length === 0) {
+      searchResultSet = [];
+      return;
+    }
+
+    const parsedQueries = parseQuery(query);
 
     // Adjust weights so that all positive weights are split evenly
     // and all negative weights are split evenly, and the sum of all
@@ -131,11 +140,7 @@
       },
       body: JSON.stringify({
         queries: parsedQueries,
-        preferences: preferenceValues.map((preference) => ({
-          filename: preference.file.filename,
-          index: preference.searchResult.index,
-          weight: preference.weight,
-        })),
+        preferences: preferenceValues,
       }),
     });
     searchResultSet = await response.json();
@@ -192,7 +197,7 @@
 <Tailwindcss />
 
 <main class="flex flex-col h-full bg-slate-100">
-  <header class="flex flex-row items-center border-b-4 border-black py-4 px-8">
+  <header class="flex flex-row border-b-4 border-black py-4 px-8 items-start">
     <h1 class="text-3xl font-mono font-bold inline-flex pr-6">Semantra</h1>
     <SearchBar
       {preferences}

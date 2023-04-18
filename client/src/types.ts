@@ -6,6 +6,11 @@ export interface File {
   filetype: "text" | "pdf";
 }
 
+export interface ParsedQuery {
+  query: string;
+  weight: number;
+}
+
 export type SearchResultSet = [string, SearchResult[]][];
 
 export interface SearchResult {
@@ -13,6 +18,9 @@ export interface SearchResult {
   text: string;
   offset: [number, number];
   index: number;
+  filename: string;
+  queries: ParsedQuery[];
+  preferences: Preference[];
 }
 
 export interface Preference {

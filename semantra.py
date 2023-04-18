@@ -7,9 +7,10 @@ import numpy as np
 from annoy import AnnoyIndex
 from flask import Flask, request, jsonify, send_from_directory, send_file, make_response
 import click
-from models import models, BaseModel, TransformerModel
+from models import models, BaseModel, TransformerModel, as_numpy
 import io
 from pdf import get_pdf_content
+import math
 
 
 def join_text_chunks(chunks):
@@ -679,25 +680,13 @@ def get_embeddings(
         queries = request.json["queries"]
         preferences = request.json["preferences"]
 
-        query_embedding = model.embed_queries(queries) if len(queries) > 0 else None
+        # Get combined query and preference embedding
+        embedding = model.embed_queries_and_preferences(queries, preferences, documents)
         results = []
         for doc in documents.values():
             embeddings = doc.embeddings
 
-            # Add preferences to embeddings
-            preference_embedding = np.sum(
-                [
-                    *([query_embedding] if query_embedding is not None else []),
-                    *[
-                        documents[pref["filename"]].embeddings[pref["index"]]
-                        * pref["weight"]
-                        for pref in preferences
-                    ],
-                ],
-                axis=0,
-            )
-
-            x = np.concatenate([embeddings, preference_embedding[None, ...]])
+            x = np.concatenate([embeddings, embedding[None, ...]])
             y = np.zeros(len(embeddings) + 1)
             y[-1] = 1
 
@@ -728,6 +717,9 @@ def get_embeddings(
                         "distance": distance,
                         "offset": offset,
                         "index": int(index),
+                        "filename": doc.filename,
+                        "queries": queries,
+                        "preferences": preferences,
                     }
                 )
             results.append([doc.filename, sub_results])
@@ -740,35 +732,18 @@ def get_embeddings(
         preferences = request.json["preferences"]
         if svm:
             return querysvm()
-        query_embedding = model.embed_queries(queries) if len(queries) > 0 else None
-        results = []
-        print(queries)
-        print(preferences)
-        print("---")
-        for doc in documents.values():
-            # Add preferences to embeddings
-            preference_embedding = np.sum(
-                [
-                    *([query_embedding] if query_embedding is not None else []),
-                    *[
-                        documents[pref["filename"]].embeddings[pref["index"]]
-                        * pref["weight"]
-                        for pref in preferences
-                    ],
-                ],
-                axis=0,
-            )
 
+        # Get combined query and preference embedding
+        embedding = model.embed_queries_and_preferences(queries, preferences, documents)
+
+        results = []
+        for doc in documents.values():
             embeddings_dbs = doc.embeddings_dbs
             text_chunks = doc.text_chunks
             offsets = doc.offsets
             sub_results = []
             for i, [index, distance] in enumerate(
-                zip(
-                    *embeddings_dbs[0].get_nns_by_vector(
-                        preference_embedding, 10, -1, True
-                    )
-                )
+                zip(*embeddings_dbs[0].get_nns_by_vector(embedding, 10, -1, True))
             ):
                 offset = offsets[index]
                 text = join_text_chunks(text_chunks[offset[0] : offset[1]])
@@ -778,10 +753,129 @@ def get_embeddings(
                         "distance": distance,
                         "offset": offset,
                         "index": int(index),
+                        "filename": doc.filename,
+                        "queries": queries,
+                        "preferences": preferences,
                     }
                 )
             results.append([doc.filename, sub_results])
         return jsonify(results)
+
+    @app.route("/api/explain", methods=["POST"])
+    def explain():
+        filename = request.json["filename"]
+        offset = request.json["offset"]
+        tokens = documents[filename].text_chunks[offset[0] : offset[1]]
+        queries = request.json["queries"]
+        preferences = request.json["preferences"]
+        embedding = model.embed_queries_and_preferences(queries, preferences, documents)
+
+        # Find hot-spots within the result tokens
+        def get_splits(divide_factor=2, num_splits=3, start=0, end=len(tokens)):
+            window_length = math.ceil((end - start) / divide_factor)
+            split_length = math.ceil((end - start) / num_splits)
+            splits = []
+            for i in range(num_splits):
+                splits.append(
+                    (
+                        start + i * split_length,
+                        min(end, start + i * split_length + window_length),
+                    )
+                )
+            return splits
+
+        def exclude_window(start, end):
+            nonlocal tokens
+            return join_text_chunks(tokens[:start] + tokens[end:])
+
+        def include_window(start, end):
+            nonlocal tokens
+            return join_text_chunks(tokens[start:end])
+
+        def get_highest_ranked_split(splits):
+            nonlocal tokens, embedding
+            print("Splits", splits)
+            split_queries = [exclude_window(start, end) for start, end in splits]
+            print("Split queries: ", split_queries)
+            split_windows = np.array(
+                [
+                    as_numpy(model.embed_document(split_query))
+                    for split_query in split_queries
+                ]
+            )
+            distances = split_windows.dot(embedding) / (
+                np.linalg.norm(split_windows, axis=1) * np.linalg.norm(embedding)
+            )
+            print(
+                "Distances: ",
+                [
+                    (join_text_chunks(tokens[start:end]), distance)
+                    for (start, end), distance in zip(splits, distances)
+                ],
+            )
+            # Return the splits in order of highest to lowest ranked
+            return sorted(zip(splits, distances), key=lambda x: x[1], reverse=False)
+
+        def as_tokens(splits):
+            nonlocal tokens
+            indices = sorted([split[0] for split in splits], key=lambda x: x[0])
+            last_index = 0
+            chunks = []
+
+            def append(start, end, type):
+                if start == end:
+                    return
+                nonlocal chunks, tokens
+                chunks.append(
+                    {
+                        "text": join_text_chunks(tokens[start:end]),
+                        "type": type,
+                    }
+                )
+                if type == "highlight":
+                    print("Highlighting: ", join_text_chunks(tokens[start:end]))
+
+            for index in indices:
+                append(last_index, index[0], "normal")
+                append(index[0], index[1], "highlight")
+                last_index = index[1]
+
+            append(last_index, len(tokens), "normal")
+            return chunks
+
+        splits = get_splits(divide_factor=2, num_splits=3, start=0, end=len(tokens))
+        top_splits = get_highest_ranked_split(splits)[:2]
+        # print("Top splits: ", top_splits)
+        second_splits_1 = get_highest_ranked_split(
+            get_splits(
+                divide_factor=3,
+                num_splits=3,
+                start=top_splits[0][0][0],
+                end=top_splits[0][0][1],
+            )
+        )
+        second_splits_2 = get_highest_ranked_split(
+            get_splits(
+                divide_factor=3,
+                num_splits=3,
+                start=top_splits[1][0][0],
+                end=top_splits[1][0][1],
+            )
+        )
+        # second_splits = sorted(
+        #     second_splits_1 + second_splits_2, key=lambda x: x[1], reverse=True
+        # )[:2]
+        # print("Second splits: ", second_splits)
+        # return jsonify(as_tokens(second_splits))
+        # return jsonify(as_tokens(top_splits))
+        return jsonify(
+            as_tokens(
+                [
+                    second_splits_1[0],
+                    second_splits_2[0],
+                ]
+            )
+        )
 
     @app.route("/api/getfile", methods=["GET"])
     def getfile():

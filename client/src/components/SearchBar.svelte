@@ -4,14 +4,27 @@
   const dispatch = createEventDispatcher();
 
   export let preferences: { [key: string]: Preference };
-  let value = "";
 
   $: preferenceValues = Object.values(preferences).filter(
     (preference) => preference.weight !== 0
   );
 
+  function getSearchKey(..._reactiveArgs: any[]) {
+    return JSON.stringify({
+      query: value,
+      preferences: preferenceValues || [],
+    });
+  }
+
+  let value = "";
+  let lastSearchKey = getSearchKey();
+
+  $: searchKey = getSearchKey(value, preferenceValues);
+  $: searchOutdated = searchKey !== lastSearchKey;
+
   function search() {
     dispatch("search", value);
+    lastSearchKey = searchKey;
   }
 </script>
 
@@ -19,6 +32,9 @@
   <div class="flex items-center relative flex-1">
     <input
       class="bg-white py-2 px-4 pl-12 font-mono w-full rounded border-black border"
+      class:bg-yellow-50={searchOutdated}
+      class:border-yellow-600={searchOutdated}
+      class:border-dashed={searchOutdated}
       placeholder="enter a search query"
       bind:value
       on:keydown={(e) => {
