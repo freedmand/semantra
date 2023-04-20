@@ -501,6 +501,20 @@ def process(
     help="Whether to use an offsetted window when embedding",
 )
 @click.option(
+    "--port",
+    type=int,
+    default=8080,
+    show_default=True,
+    help="Port to use for embedding server",
+)
+@click.option(
+    "--host",
+    type=str,
+    default="0.0.0.0",
+    show_default=True,
+    help="Host to use for embedding server",
+)
+@click.option(
     "--pool-size",
     type=int,
     default=None,
@@ -565,6 +579,8 @@ def get_embeddings(
     min_window_tokens=128,
     divide_factor=4,
     use_offset=True,
+    port=8080,
+    host="0.0.0.0",
     pool_size=None,
     pool_count=None,
     doc_token_pre=None,
@@ -921,8 +937,7 @@ def get_embeddings(
         filename = request.args.get("filename")
         return jsonify(documents[filename].text_chunks)
 
-    print("Running at port 8080")
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host=host, port=port)
 
 
 if __name__ == "__main__":

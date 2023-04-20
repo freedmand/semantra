@@ -7,6 +7,14 @@
   export let position: PdfPosition;
   export let selectedOffset: Offset | null;
 
+  function x(x: number): number {
+    return (x / position.page_width) * 100;
+  }
+
+  function y(y: number): number {
+    return (y / position.page_height) * 100;
+  }
+
   function processChars(chars: PdfChar[]): PdfChar[] {
     const result: PdfChar[] = [];
     let textBank: string[] = [];
@@ -75,14 +83,13 @@
       const y1 =
         position.page_height - Math.min(startChar[1].y0, lastChar[1].y0);
       highlights.push({
-        x: x0,
-        y: y0,
-        width: x1 - x0,
-        height: y1 - y0,
+        x: x(x0),
+        y: y(y0),
+        width: x(x1 - x0),
+        height: y(y1 - y0),
       });
     };
 
-    console.log({ highlightedChars });
     for (const char of highlightedChars) {
       if (lastChar != null) {
         const startCharY = position.page_height - startChar[1].y0;
@@ -140,13 +147,14 @@
   {#each processedChars as char, offset}
     <div
       class="absolute monospace text-transparent"
-      style="font-size: {baseFontSize}px; left: {char[1]
-        .x0}px; top: {position.page_height -
-        char[1]
-          .y1}px; width: {mWidth}px; height: {mHeight}px; padding-right: {(position.page_width -
-        char[1].x1) /
-        ((char[1].x1 - char[1].x0) / mWidth)}px; padding-bottom: {char[1].y0 /
-        ((char[1].y1 - char[1].y0) / mHeight)}px;
+      style="font-size: {baseFontSize}px; left: {x(char[1].x0)}%; top: {y(
+        position.page_height - char[1].y1
+      )}%; width: {x(mWidth)}%; height: {y(mHeight)}%; padding-right: {x(
+        (position.page_width - char[1].x1) /
+          ((char[1].x1 - char[1].x0) / mWidth)
+      )}%; padding-bottom: {y(
+        char[1].y0 / ((char[1].y1 - char[1].y0) / mHeight)
+      )}%;
              transform-origin: top left; transform: scale({(char[1].x1 -
         char[1].x0) /
         mWidth}, {(char[1].y1 - char[1].y0) / mHeight});"
@@ -157,7 +165,7 @@
   {#each highlights as highlight}
     <div
       class="absolute highlight pointer-events-none"
-      style="left: {highlight.x}px; top: {highlight.y}px; width: {highlight.width}px; height: {highlight.height}px;"
+      style="left: {highlight.x}%; top: {highlight.y}%; width: {highlight.width}%; height: {highlight.height}%;"
     />
   {/each}
 </div>

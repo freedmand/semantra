@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { createEventDispatcher } from "svelte";
   import { inview, type Options } from "svelte-inview";
   import type { File, Offset, PdfPosition } from "../types";
   import PdfPageImage from "./PdfPageImage.svelte";
   import PdfChars from "./PdfChars.svelte";
+  const dispatch = createEventDispatcher();
 
   const options: Options = {
     rootMargin: "50px",
@@ -12,6 +14,8 @@
   export let position: PdfPosition;
   export let pageNumber: number;
   export let selectedOffset: Offset | null;
+  export let zoom: number;
+  const marginPx = 16;
   let isInView = false;
   let isInViewForEnoughTime = false;
 
@@ -28,9 +32,16 @@
 
 <div
   use:inview={options}
-  on:inview_change={(e) => (isInView = e.detail.inView)}
-  class="bg-white my-4 mx-auto bg-contain relative"
-  style="width: {position.page_width}px; height: {position.page_height}px;"
+  on:inview_change={(e) => {
+    isInView = e.detail.inView;
+    dispatch("inview", {
+      isInView,
+      pageNumber,
+    });
+  }}
+  class="bg-white bg-contain relative"
+  style="width: {position.page_width * zoom}px; height: {position.page_height *
+    zoom}px; margin: {marginPx * zoom}px auto {marginPx * zoom}px auto"
 >
   {#if isInView && isInViewForEnoughTime}
     <PdfPageImage {file} {pageNumber} scales={[0.25, 2]} />
