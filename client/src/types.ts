@@ -12,6 +12,7 @@ export interface ParsedQuery {
 }
 
 export type SearchResultSet = [string, SearchResult[]][];
+export type ScoredSearchResult = [string, SearchResult[], number];
 
 export interface SearchResult {
   distance: number;

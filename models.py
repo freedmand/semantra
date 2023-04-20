@@ -38,7 +38,7 @@ def filter_none(x):
 def as_numpy(x):
     # If x is a tensor, convert it to a numpy array
     if isinstance(x, torch.Tensor):
-        return x.numpy()
+        return x.cpu().numpy()
     return x
 
 

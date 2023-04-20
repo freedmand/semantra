@@ -399,7 +399,7 @@ def process(
             nonlocal pool, pool_token_count, embeddings, embedding_index, f
 
             if len(pool) > 0:
-                embedding_results = model.embed(tokens, pool)
+                embedding_results = model.embed(tokens, pool).cpu()
                 embeddings[
                     embedding_index : embedding_index + len(pool)
                 ] = embedding_results

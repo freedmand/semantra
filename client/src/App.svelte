@@ -210,6 +210,7 @@
       {preferences}
       on:setPreference={(e) => setPreference(e.detail)}
       on:navigate={(e) => jumpToResult(e.detail)}
+      {activeFile}
       {filesByPath}
       {searchResultSet}
     />
