@@ -22,6 +22,8 @@
   let text: string | null = null;
   let pdfPositions: PdfPosition[] = [];
   let updating = false;
+  let unsearched = true;
+  let searchResultsElem: SearchResults;
 
   let preferences: { [key: string]: Preference } = {};
 
@@ -66,7 +68,10 @@
     updating = false;
   }
 
-  let searchResultSet: SearchResultSet = [];
+  let searchResultSet: SearchResultSet = {
+    results: [],
+    sort: "asc",
+  };
 
   let textView: TextView;
   let pdfView: PdfView;
@@ -93,6 +98,10 @@
     return parsedQueries;
   }
 
+  function scrollSearchResultsToTop() {
+    if (searchResultsElem) searchResultsElem.scrollToTop();
+  }
+
   async function handleSearch(query: string) {
     const preferenceValues = Object.values(preferences)
       .filter((preference) => preference.weight !== 0)
@@ -101,9 +110,9 @@
     // Ignore empty queries
     if (query.trim() === "" && preferenceValues.length === 0) {
       searchResultSet = [];
+      scrollSearchResultsToTop();
       return;
     }
-
     const parsedQueries = parseQuery(query);
 
     // Adjust weights so that all positive weights are split evenly
@@ -144,6 +153,8 @@
       }),
     });
     searchResultSet = await response.json();
+    scrollSearchResultsToTop();
+    unsearched = false;
   }
 
   onMount(async () => {
@@ -192,13 +203,17 @@
     preferences[preferenceKey(preference.file, preference.searchResult)] =
       preference;
   }
+
+  let sidebarExpanded = true;
 </script>
 
 <Tailwindcss />
 
 <main class="flex flex-col h-full bg-slate-100">
-  <header class="flex flex-row border-b-4 border-black py-4 px-8 items-start">
-    <h1 class="text-3xl font-mono font-bold inline-flex pr-6">Semantra</h1>
+  <header
+    class="flex flex-row border-b-4 border-black py-4 px-8 max-lg:px-4 items-start"
+  >
+    <h1 class="text-3xl font-mono font-bold inline-flex pr-6 mt-1">Semantra</h1>
     <SearchBar
       {preferences}
       on:setPreference={(e) => setPreference(e.detail)}
@@ -207,6 +222,9 @@
   </header>
   <article class="flex flex-1 flex-row relative items-stretch">
     <SearchResults
+      bind:sidebarExpanded
+      bind:this={searchResultsElem}
+      {unsearched}
       {preferences}
       on:setPreference={(e) => setPreference(e.detail)}
       on:navigate={(e) => jumpToResult(e.detail)}
@@ -214,7 +232,7 @@
       {filesByPath}
       {searchResultSet}
     />
-    <div class="flex flex-col w-2/3">
+    <div class="flex flex-col flex-1">
       {#if activeFile != null}
         <TabBar disabled={updating} bind:index={activeFileIndex} {files} />
         {#if activeFile.filetype === "text"}

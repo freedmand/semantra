@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import type { File, Offset, PdfChar, PdfPosition } from "../types";
 
   export let file: File;
   export let pageNumber: number;
   export let position: PdfPosition;
   export let selectedOffset: Offset | null;
+  export let zoom: number;
 
   function x(x: number): number {
     return (x / position.page_width) * 100;
@@ -109,9 +110,19 @@
     return highlights;
   }
 
+  async function scrollHighlightsIntoView(...args: any) {
+    await tick();
+    const highlights = document.querySelectorAll(".page-highlight");
+    if (highlights.length == 0) return;
+    highlights[0].scrollIntoView({
+      block: "center",
+    });
+  }
+
   let chars: PdfChar[] = [];
   $: processedChars = processChars(chars);
   $: highlights = getHighlightRange(processedChars, selectedOffset);
+  $: scrollHighlightsIntoView(highlights);
   $: console.log({ highlights });
   let containerElem: HTMLElement;
 
@@ -149,29 +160,30 @@
       class="absolute monospace text-transparent"
       style="font-size: {baseFontSize}px; left: {x(char[1].x0)}%; top: {y(
         position.page_height - char[1].y1
-      )}%; width: {x(mWidth)}%; height: {y(mHeight)}%; padding-right: {x(
+      )}%; width: {mWidth}px; height: {mHeight}px; padding-right: {x(
         (position.page_width - char[1].x1) /
           ((char[1].x1 - char[1].x0) / mWidth)
       )}%; padding-bottom: {y(
         char[1].y0 / ((char[1].y1 - char[1].y0) / mHeight)
       )}%;
-             transform-origin: top left; transform: scale({(char[1].x1 -
+             transform-origin: top left; transform: scale({((char[1].x1 -
         char[1].x0) /
-        mWidth}, {(char[1].y1 - char[1].y0) / mHeight});"
+        mWidth) *
+        zoom}, {((char[1].y1 - char[1].y0) / mHeight) * zoom});"
     >
       <span class="whitespace-pre">{char[0]}</span>
     </div>
   {/each}
   {#each highlights as highlight}
     <div
-      class="absolute highlight pointer-events-none"
+      class="absolute page-highlight pointer-events-none"
       style="left: {highlight.x}%; top: {highlight.y}%; width: {highlight.width}%; height: {highlight.height}%;"
     />
   {/each}
 </div>
 
 <style>
-  .highlight {
+  .page-highlight {
     background-color: rgb(255 255 0 / 72%);
     mix-blend-mode: darken;
   }

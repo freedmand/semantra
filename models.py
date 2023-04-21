@@ -60,6 +60,10 @@ class BaseModel(ABC):
         ...
 
     @abstractmethod
+    def get_config(self):
+        ...
+
+    @abstractmethod
     def embed(self, tokens, offsets, is_query: bool = False) -> "list[list[float]]":
         ...
 
@@ -111,6 +115,13 @@ class OpenAIModel(BaseModel):
         self.num_dimensions = num_dimensions
         self.tokenizer = tiktoken.get_encoding(tokenizer_name)
 
+    def get_config(self):
+        return {
+            "model_type": "openai",
+            "model_name": self.model_name,
+            "tokenizer_name": self.tokenizer.name,
+        }
+
     def get_num_dimensions(self) -> int:
         return self.num_dimensions
 
@@ -151,6 +162,12 @@ class TransformerModel(BaseModel):
         self.model = AutoModel.from_pretrained(model_name)
 
         # Get tokens
+        self.pre_post_tokens = [
+            doc_token_pre,
+            doc_token_post,
+            query_token_pre,
+            query_token_post,
+        ]
         self.doc_token_pre = (
             self.tokenizer.encode(doc_token_pre, add_special_tokens=False)
             if doc_token_pre
@@ -177,6 +194,17 @@ class TransformerModel(BaseModel):
         self.cuda = cuda
         if self.cuda:
             self.model = self.model.cuda()
+
+    def get_config(self):
+        return {
+            "model_type": "transformers",
+            "model_name": self.model_name,
+            "doc_token_pre": self.pre_post_tokens[0],
+            "doc_token_post": self.pre_post_tokens[1],
+            "query_token_pre": self.pre_post_tokens[2],
+            "query_token_post": self.pre_post_tokens[3],
+            "asymmetric": self.asymmetric,
+        }
 
     def is_asymmetric(self):
         return self.asymmetric
@@ -281,7 +309,6 @@ class TransformerModel(BaseModel):
 
 models = {
     "openai": {
-        "params": {"type": "openai", "model_name": "text-embedding-ada-002"},
         "cost_per_token": 0.0004 / 1000,
         "pool_size": 50000,
         "pool_count": 2000,
@@ -292,19 +319,16 @@ models = {
         ),
     },
     "minilm": {
-        "params": {"type": "transformers", "model_name": minilm_model_name},
         "cost_per_token": None,
         "pool_size": 50000,
         "get_model": lambda: TransformerModel(model_name=minilm_model_name),
     },
     "mpnet": {
-        "params": {"type": "transformers", "model_name": mpnet_model_name},
         "cost_per_token": None,
         "pool_size": 15000,
         "get_model": lambda: TransformerModel(model_name=mpnet_model_name),
     },
     "sgpt": {
-        "params": {"type": "transformers", "model_name": sgpt_model_name},
         "cost_per_token": None,
         "pool_size": 10000,
         "get_model": lambda: TransformerModel(
@@ -317,7 +341,6 @@ models = {
         ),
     },
     "sgpt-1.3B": {
-        "params": {"type": "transformers", "model_name": sgpt_1_3B_model_name},
         "cost_per_token": None,
         "pool_size": 1000,
         "get_model": lambda: TransformerModel(

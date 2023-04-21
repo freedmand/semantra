@@ -11,7 +11,10 @@ export interface ParsedQuery {
   weight: number;
 }
 
-export type SearchResultSet = [string, SearchResult[]][];
+export type SearchResultSet = {
+  results: [string, SearchResult[]][];
+  sort: "asc" | "desc";
+};
 export type ScoredSearchResult = [string, SearchResult[], number];
 
 export interface SearchResult {

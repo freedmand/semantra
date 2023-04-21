@@ -12,6 +12,8 @@
   let pageContainer: HTMLDivElement;
 
   let zoom = 1;
+  const MAX_ZOOM = 4;
+  const MIN_ZOOM = 0.4;
 
   let selectedOffset: Offset | null = null;
 
@@ -28,6 +30,9 @@
   $: pageObjects.length > 0 && updateCurrentPage();
 
   async function adjustZoom(newZoom: number) {
+    if (newZoom > MAX_ZOOM || newZoom < MIN_ZOOM) {
+      return;
+    }
     const oldZoom = zoom;
     let scrollTop = pageContainer.scrollTop;
     zoom = newZoom;

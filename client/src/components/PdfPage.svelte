@@ -45,6 +45,6 @@
 >
   {#if isInView && isInViewForEnoughTime}
     <PdfPageImage {file} {pageNumber} scales={[0.25, 2]} />
-    <PdfChars {file} {position} {pageNumber} {selectedOffset} />
+    <PdfChars {file} {position} {pageNumber} {selectedOffset} {zoom} />
   {/if}
 </div>

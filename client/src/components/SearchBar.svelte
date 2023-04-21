@@ -35,7 +35,7 @@
       class:bg-yellow-50={searchOutdated}
       class:border-yellow-600={searchOutdated}
       class:border-dashed={searchOutdated}
-      placeholder="enter a search query"
+      placeholder="Search"
       bind:value
       on:keydown={(e) => {
         if (e.key === "Enter") {

@@ -2,8 +2,8 @@ import pypdfium2 as pdfium
 from multiprocessing import Lock
 import json
 import os
-import hashlib
 import tqdm
+from util import get_converted_pdf_txt_filename, get_pdf_positions_filename
 
 
 class PDFContent:
@@ -30,26 +30,18 @@ class PDFContent:
         return textmap.tuples
 
 
-def file_md5(filename):
-    hash_md5 = hashlib.md5()
-    with open(filename, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            hash_md5.update(chunk)
-    return hash_md5.hexdigest()[:10]
 
-
-def get_pdf_content(filename, semantra_dir, base_filename):
-    hash = file_md5(filename)
-    converted_txt = os.path.join(semantra_dir, base_filename + f".{hash}.txt")
+def get_pdf_content(md5, filename, semantra_dir, force):
+    converted_txt = os.path.join(semantra_dir, get_converted_pdf_txt_filename(md5))
     position_index = os.path.join(
-        semantra_dir, base_filename + f".{hash}.positions.json"
+        semantra_dir, get_pdf_positions_filename(md5)
     )
 
     import pdfplumber
 
     pdf = pdfplumber.open(filename)
 
-    if not os.path.exists(converted_txt) or not os.path.exists(position_index):
+    if force or not os.path.exists(converted_txt) or not os.path.exists(position_index):
         positions = []
         position = 0
         with open(converted_txt, "w", encoding="utf-8", errors="ignore") as f:
