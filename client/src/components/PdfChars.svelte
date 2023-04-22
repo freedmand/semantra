@@ -1,12 +1,14 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import type { File, Offset, PdfChar, PdfPosition } from "../types";
+  import { copyChars, layout } from "../layoutEngine";
 
   export let file: File;
   export let pageNumber: number;
   export let position: PdfPosition;
   export let selectedOffset: Offset | null;
   export let zoom: number;
+  export let scrollHighlights: boolean;
 
   function x(x: number): number {
     return (x / position.page_width) * 100;
@@ -16,100 +18,6 @@
     return (y / position.page_height) * 100;
   }
 
-  function processChars(chars: PdfChar[]): PdfChar[] {
-    const result: PdfChar[] = [];
-    let textBank: string[] = [];
-    let lastChar: PdfChar | null = null;
-    for (const char of chars.slice()) {
-      if (char[1] != null) {
-        if (textBank.length != 0) {
-          for (const text of textBank) {
-            const newChar: PdfChar = [text, char[1]];
-            result.push(newChar);
-          }
-          textBank = [];
-        }
-        result.push(char);
-        lastChar = char;
-      } else {
-        if (lastChar != null) {
-          const newChar: PdfChar = [char[0], lastChar[1]];
-          result.push(newChar);
-        } else {
-          textBank.push(char[0]);
-        }
-      }
-    }
-    return result;
-  }
-
-  interface Highlight {
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  }
-
-  function getHighlightRange(
-    chars: PdfChar[],
-    offset: Offset | null
-  ): Highlight[] {
-    if (offset == null) {
-      return [];
-    }
-
-    const [start, end] = offset;
-    const startCharIndex = position.char_index;
-    const endCharIndex = position.char_index + chars.length;
-    if (start >= endCharIndex || end <= startCharIndex) {
-      return [];
-    }
-
-    const highlightedChars = chars.slice(
-      Math.max(0, start - startCharIndex),
-      Math.min(chars.length, end - startCharIndex)
-    );
-
-    // Get smooth highlight rectangles
-    const highlights: Highlight[] = [];
-    let startChar: PdfChar | null = null;
-    let lastChar: PdfChar | null = null;
-    const pushRect = () => {
-      if (startChar == null || lastChar == null || startChar == lastChar)
-        return;
-      const x0 = Math.min(startChar[1].x0, lastChar[1].x0);
-      const x1 = Math.max(startChar[1].x1, lastChar[1].x1);
-      const y0 =
-        position.page_height - Math.max(startChar[1].y1, lastChar[1].y1);
-      const y1 =
-        position.page_height - Math.min(startChar[1].y0, lastChar[1].y0);
-      highlights.push({
-        x: x(x0),
-        y: y(y0),
-        width: x(x1 - x0),
-        height: y(y1 - y0),
-      });
-    };
-
-    for (const char of highlightedChars) {
-      if (lastChar != null) {
-        const startCharY = position.page_height - startChar[1].y0;
-        const charY = position.page_height - char[1].y1;
-        if (charY > startCharY) {
-          pushRect();
-          startChar = char;
-        }
-      }
-      if (lastChar == null) {
-        startChar = char;
-      }
-      lastChar = char;
-    }
-    pushRect();
-
-    return highlights;
-  }
-
   async function scrollHighlightsIntoView(...args: any) {
     await tick();
     const highlights = document.querySelectorAll(".page-highlight");
@@ -117,13 +25,113 @@
     highlights[0].scrollIntoView({
       block: "center",
     });
+    scrollHighlights = false;
+  }
+
+  function processChars(chars: PdfChar[]): [PdfChar[], [number, number][]] {
+    // Join words together
+    const processedChars: PdfChar[] = [];
+
+    const isSpace = (char: PdfChar): boolean => {
+      return /\s/.test(char[0]);
+    };
+
+    const wordIndexMap: [number, number][] = [];
+    let currentWord: PdfChar[] = [];
+    let wordStart: number | null = null;
+    let wordEnd: number | null = null;
+
+    const pushChar = (char: PdfChar, start: number, end: number) => {
+      processedChars.push(char);
+      wordIndexMap.push([start, end]);
+    };
+
+    const buildWord = (char: PdfChar, i: number) => {
+      if (wordStart == null) wordStart = i;
+      wordEnd = i + 1;
+      currentWord.push(char);
+    };
+
+    const getMin = (l: number[]): number => {
+      let min: number;
+      for (const x of l) {
+        if (min == null || x < min) {
+          min = x;
+        }
+      }
+      return min;
+    };
+
+    const getMax = (l: number[]): number => {
+      let max: number;
+      for (const x of l) {
+        if (max == null || x > max) {
+          max = x;
+        }
+      }
+      return max;
+    };
+
+    const pushWord = () => {
+      if (currentWord.length == 0 || wordStart == null || wordEnd == null)
+        return;
+      const word = currentWord.map((x) => x[0]).join("");
+      const x0 = getMin(currentWord.map((x) => x[1].x0));
+      const x1 = getMax(currentWord.map((x) => x[1].x1));
+      const y0 = getMin(currentWord.map((x) => x[1].y0));
+      const y1 = getMax(currentWord.map((x) => x[1].y1));
+      const char: PdfChar = [word, { x0, x1, y0, y1 }];
+      pushChar(char, wordStart, wordEnd);
+      currentWord = [];
+      wordStart = null;
+      wordEnd = null;
+    };
+
+    for (let i = 0; i < chars.length; i++) {
+      const char = chars[i];
+      if (isSpace(char)) {
+        pushWord();
+        pushChar(char, i, i + 1);
+      } else {
+        buildWord(char, i);
+      }
+    }
+    pushWord();
+
+    return [processedChars, wordIndexMap];
   }
 
   let chars: PdfChar[] = [];
-  $: processedChars = processChars(chars);
-  $: highlights = getHighlightRange(processedChars, selectedOffset);
-  $: scrollHighlightsIntoView(highlights);
-  $: console.log({ highlights });
+  $: words = processChars(copyChars(chars));
+  $: processedChars = layout(
+    position.page_width,
+    position.page_height,
+    words[0]
+  );
+
+  function getHighlightWordIndices(
+    words: [PdfChar[], [number, number][]],
+    start: number,
+    end: number
+  ): number[] {
+    const wordIndices = words[1];
+    const highlights = wordIndices
+      .map<[number, [number, number]]>((x, i) => [i, x])
+      .filter((x) => x[1][0] >= start && x[1][1] <= end)
+      .map((x) => x[0]);
+    return highlights;
+  }
+
+  $: highlightWordIndices =
+    selectedOffset == null
+      ? []
+      : getHighlightWordIndices(
+          words,
+          selectedOffset[0] - position.char_index,
+          selectedOffset[1] - position.char_index
+        );
+
+  $: scrollHighlights && scrollHighlightsIntoView(highlightWordIndices);
   let containerElem: HTMLElement;
 
   const baseFontSize = 16;
@@ -150,35 +158,53 @@
         file.filename
       )}&page=${pageNumber}`
     );
-    chars = await response.json();
+    const json = await response.json();
+    chars = json.map((x) => [
+      x[0],
+      {
+        x0: x[1][0],
+        y0: x[1][1],
+        x1: x[1][2],
+        y1: x[1][3],
+      },
+    ]);
   });
 </script>
 
 <div class="absolute left-0 top-0 right-0 bottom-0" bind:this={containerElem}>
-  {#each processedChars as char, offset}
+  {#each processedChars as char, i}
     <div
-      class="absolute monospace text-transparent"
-      style="font-size: {baseFontSize}px; left: {x(char[1].x0)}%; top: {y(
-        position.page_height - char[1].y1
-      )}%; width: {mWidth}px; height: {mHeight}px; padding-right: {x(
-        (position.page_width - char[1].x1) /
-          ((char[1].x1 - char[1].x0) / mWidth)
-      )}%; padding-bottom: {y(
-        char[1].y0 / ((char[1].y1 - char[1].y0) / mHeight)
-      )}%;
-             transform-origin: top left; transform: scale({((char[1].x1 -
-        char[1].x0) /
-        mWidth) *
-        zoom}, {((char[1].y1 - char[1].y0) / mHeight) * zoom});"
+      class="absolute content-box text-transparent"
+      style="left: {(char[1].x0 - (char[1].lpad || 0)) *
+        zoom}px; top: {(position.page_height -
+        char[1].y1 -
+        (char[1].bpad || 0)) *
+        zoom}px; width: {(char[1].x1 -
+        char[1].x0 +
+        (char[1].lpad || 0) +
+        (char[1].rpad || 0)) *
+        zoom}px; height: {(char[1].y1 -
+        char[1].y0 +
+        (char[1].bpad || 0) +
+        (char[1].tpad || 0)) *
+        zoom}px;
+        padding-left: {(char[1].lpad || 0) * zoom}px;
+        padding-right: {(char[1].rpad || 0) * zoom}px;
+        padding-bottom: {(char[1].tpad || 0) * zoom}px;
+        padding-top: {(char[1].bpad || 0) * zoom}px;"
     >
-      <span class="whitespace-pre">{char[0]}</span>
+      <span
+        class="inline-block whitespace-pre origin-top-left select-all"
+        class:page-highlight={highlightWordIndices.includes(i)}
+        style="font-family: monospace; font-size: {baseFontSize}px; transform: scale({((char[1]
+          .x1 -
+          char[1].x0) /
+          mWidth /
+          char[0].length) *
+          zoom}, {((char[1].y1 - char[1].y0) / mHeight) * zoom});"
+        >{char[0]}</span
+      >
     </div>
-  {/each}
-  {#each highlights as highlight}
-    <div
-      class="absolute page-highlight pointer-events-none"
-      style="left: {highlight.x}%; top: {highlight.y}%; width: {highlight.width}%; height: {highlight.height}%;"
-    />
   {/each}
 </div>
 

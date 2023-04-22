@@ -173,6 +173,8 @@ def process(
         "num_tokens": num_tokens,
         "num_embeddings": len(offsets),
         "num_embedding_tokens": num_embedding_tokens,
+        "use_annoy": use_annoy,
+        "num_annoy_trees": num_annoy_trees,
         "semantra_version": SEMANTRA_VERSION,
     }
     print(full_config)
@@ -181,18 +183,19 @@ def process(
     with open(config_filename, "w") as f:
         f.write(json.dumps(full_config))
 
-    print(full_config)
-
     embeddings_filenames = []
     annoy_filenames = []
     with tqdm.tqdm(total=num_embedding_tokens) as pbar:
-        for (size, offset), sub_offsets in zip(windows, offsets):
+        for (size, offset, rewind), sub_offsets in zip(windows, offsets):
             embeddings_filename = os.path.join(
-                semantra_dir, get_embeddings_filename(md5, config_hash, size, offset)
+                semantra_dir,
+                get_embeddings_filename(md5, config_hash, size, offset, rewind),
             )
             annoy_filename = os.path.join(
                 semantra_dir,
-                get_annoy_filename(md5, config_hash, size, offset, num_annoy_trees),
+                get_annoy_filename(
+                    md5, config_hash, size, offset, rewind, num_annoy_trees
+                ),
             )
             embeddings_filenames.append(embeddings_filename)
             annoy_filenames.append(annoy_filename)
@@ -302,13 +305,18 @@ def process(
     )
 
 
-def process_windows(windows: str) -> list[tuple[int, int]]:
+def process_windows(windows: str) -> "list[tuple[int, int, int]]":
     for window in windows.split(","):
-        if "-" in window:
-            size, offset = window.split("-")
-            yield int(size), int(offset)
+        if "_" in window:
+            # One or two occurrences?
+            if window.count("_") == 1:
+                size, offset = window.split("_")
+                rewind = 0
+            else:
+                size, offset, rewind = window.split("_")
+            yield int(size), int(offset), int(rewind)
         else:
-            yield int(window), 0
+            yield int(window), 0, 0
 
 
 @click.command()
@@ -316,7 +324,7 @@ def process_windows(windows: str) -> list[tuple[int, int]]:
 @click.option(
     "--model",
     type=click.Choice(models.keys(), case_sensitive=True),
-    default="mpnet",
+    default="minilm",
     show_default=True,
     help="Preset model to use for embedding",
 )
@@ -328,9 +336,9 @@ def process_windows(windows: str) -> list[tuple[int, int]]:
 @click.option(
     "--windows",
     type=str,
-    default="128",
+    default="128_0_16",
     show_default=True,
-    help='Embedding windows to extract. A comma-separated list of the format "size[-offset=0]. The first size is used for the primary search, the second size if provided is used for explanations',
+    help='Embedding windows to extract. A comma-separated list of the format "size[_offset=0][_rewind=0]. A window with size 128, offset 0, and rewind of 16 (128_0_16) will embed the document in chunks of 128 tokens which partially overlap by 16. Only the first window is used for search.',
 )
 @click.option(
     "--port",
@@ -383,23 +391,23 @@ def process_windows(windows: str) -> list[tuple[int, int]]:
     help="Token to append to each query in transformer models (default: None)",
 )
 @click.option(
-    "--num-neighbors",
+    "--num-results",
     type=int,
     default=10,
     show_default=True,
-    help="Number of neighbors to retrieve for queries",
+    help="Number of results (neighbors) to retrieve per file for queries",
 )
 @click.option(
     "--annoy",
     is_flag=True,
-    default=False,
+    default=True,
     show_default=True,
-    help="Use approximate kNN via Annoy instead of the default accurate kNN for queries (faster to query but less accurate)",
+    help="Use approximate kNN via Annoy for queries (faster querying at a slight cost of accuracy); if false, use exact exhaustive kNN",
 )
 @click.option(
     "--num-annoy-trees",
     type=int,
-    default=10,
+    default=100,
     show_default=True,
     help="Number of trees to use for approximate kNN via Annoy",
 )
@@ -418,6 +426,27 @@ def process_windows(windows: str) -> list[tuple[int, int]]:
     help="SVM regularization parameter; higher values penalize mispredictions more",
 )
 @click.option(
+    "--explain-split-count",
+    type=int,
+    default=9,
+    show_default=True,
+    help="Number of splits on a given window to use for explaining a query",
+)
+@click.option(
+    "--explain-split-divide",
+    type=int,
+    default=6,
+    show_default=True,
+    help="Factor to divide the window size by to get each split length for explaining a query",
+)
+@click.option(
+    "--num-explain-highlights",
+    type=int,
+    default=2,
+    show_default=True,
+    help="Number of split results to highlight for explaining a query",
+)
+@click.option(
     "--force", is_flag=True, default=False, help="Force process even if cached"
 )
 @click.option(
@@ -426,9 +455,9 @@ def process_windows(windows: str) -> list[tuple[int, int]]:
     default=None,
     help="Directory to store semantra files in",
 )
-def get_embeddings(
+def main(
     filename,
-    windows="128",
+    windows="128_0_16",
     port=8080,
     host="0.0.0.0",
     pool_size=None,
@@ -437,13 +466,16 @@ def get_embeddings(
     doc_token_post=None,
     query_token_pre=None,
     query_token_post=None,
-    model="mpnet",
+    model="minilm",
     transformer_model=None,
-    num_annoy_trees=10,
-    num_neighbors=10,
-    annoy=False,
+    num_annoy_trees=100,
+    num_results=10,
+    annoy=True,
     svm=False,
     svm_c=1.0,
+    explain_split_count=9,
+    explain_split_divide=6,
+    num_explain_highlights=2,
     force=False,
     semantra_dir=None,  # auto
 ):
@@ -562,7 +594,7 @@ def get_embeddings(
             text_chunks = doc.text_chunks
             offsets = doc.offsets[0]
             sub_results = []
-            for index in sorted_ix[:num_neighbors]:
+            for index in sorted_ix[:num_results]:
                 distance = float(distances[index])
                 offset = offsets[index]
                 text = join_text_chunks(text_chunks[offset[0] : offset[1]])
@@ -614,7 +646,7 @@ def get_embeddings(
             text_chunks = doc.text_chunks
             offsets = doc.offsets
             sub_results = []
-            for index in sorted_ix[:num_neighbors]:
+            for index in sorted_ix[:num_results]:
                 distance = similarities[index]
                 offset = offsets[index]
                 text = join_text_chunks(text_chunks[offset[0] : offset[1]])
@@ -648,14 +680,15 @@ def get_embeddings(
             offsets = doc.offsets[0]
             sub_results = []
             for [index, distance] in zip(
-                *embedding_db.get_nns_by_vector(embedding, num_neighbors, -1, True)
+                *embedding_db.get_nns_by_vector(embedding, num_results, -1, True)
             ):
                 offset = offsets[index]
                 text = join_text_chunks(text_chunks[offset[0] : offset[1]])
                 sub_results.append(
                     {
                         "text": text,
-                        "distance": distance,
+                        # Convert distance from Euclidean distance of normalized vectors to cosine
+                        "distance": 1 - distance**2.0 / 2.0,
                         "offset": offset,
                         "index": int(index),
                         "filename": doc.filename,
@@ -664,7 +697,7 @@ def get_embeddings(
                     }
                 )
             results.append([doc.filename, sub_results])
-        return jsonify(sort_results(results, False))
+        return jsonify(sort_results(results, True))
 
     @app.route("/api/explain", methods=["POST"])
     def explain():
@@ -693,10 +726,6 @@ def get_embeddings(
             nonlocal tokens
             return join_text_chunks(tokens[:start] + tokens[end:])
 
-        def include_window(start, end):
-            nonlocal tokens
-            return join_text_chunks(tokens[start:end])
-
         def get_highest_ranked_split(splits):
             nonlocal tokens, embedding
             split_queries = [exclude_window(start, end) for start, end in splits]
@@ -719,7 +748,7 @@ def get_embeddings(
             chunks = []
 
             def append(start, end, type):
-                if start == end:
+                if start >= end:
                     return
                 nonlocal chunks, tokens
                 chunks.append(
@@ -731,45 +760,20 @@ def get_embeddings(
 
             for index in indices:
                 append(last_index, index[0], "normal")
-                append(index[0], index[1], "highlight")
+                append(max(index[0], last_index), index[1], "highlight")
                 last_index = index[1]
 
             append(last_index, len(tokens), "normal")
             return chunks
 
-        splits = get_splits(divide_factor=2, num_splits=3, start=0, end=len(tokens))
-        top_splits = get_highest_ranked_split(splits)[:2]
-        # print("Top splits: ", top_splits)
-        second_splits_1 = get_highest_ranked_split(
-            get_splits(
-                divide_factor=3,
-                num_splits=3,
-                start=top_splits[0][0][0],
-                end=top_splits[0][0][1],
-            )
+        splits = get_splits(
+            divide_factor=explain_split_divide,
+            num_splits=explain_split_count,
+            start=0,
+            end=len(tokens),
         )
-        second_splits_2 = get_highest_ranked_split(
-            get_splits(
-                divide_factor=3,
-                num_splits=3,
-                start=top_splits[1][0][0],
-                end=top_splits[1][0][1],
-            )
-        )
-        # second_splits = sorted(
-        #     second_splits_1 + second_splits_2, key=lambda x: x[1], reverse=True
-        # )[:2]
-        # print("Second splits: ", second_splits)
-        # return jsonify(as_tokens(second_splits))
-        # return jsonify(as_tokens(top_splits))
-        return jsonify(
-            as_tokens(
-                [
-                    second_splits_1[0],
-                    second_splits_2[0],
-                ]
-            )
-        )
+        top_splits = get_highest_ranked_split(splits)[:num_explain_highlights]
+        return jsonify(as_tokens(top_splits))
 
     @app.route("/api/getfile", methods=["GET"])
     def getfile():
@@ -819,4 +823,4 @@ def get_embeddings(
 
 
 if __name__ == "__main__":
-    get_embeddings()
+    main()

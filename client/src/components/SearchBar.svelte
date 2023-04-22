@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createEventDispatcher } from "svelte";
+  import { createEventDispatcher, tick } from "svelte";
   import type { Preference } from "../types";
   const dispatch = createEventDispatcher();
 
@@ -18,6 +18,16 @@
 
   let value = "";
   let lastSearchKey = getSearchKey();
+
+  let preferenceContainer: HTMLDivElement;
+
+  export async function scrollToBottomOfPreferences() {
+    if (preferenceContainer != null) {
+      // Wait for a tick so new preferences are reflected
+      await tick();
+      preferenceContainer.scrollTop = preferenceContainer.scrollHeight;
+    }
+  }
 
   $: searchKey = getSearchKey(value, preferenceValues);
   $: searchOutdated = searchKey !== lastSearchKey;
@@ -46,10 +56,13 @@
     <button class="search-button" on:click={search}>Search</button>
   </div>
 
-  <div>
+  <div
+    class="max-h-24 overflow-y-auto -mb-2 mt-2"
+    bind:this={preferenceContainer}
+  >
     {#each preferenceValues as preference}
       <button
-        class="w-64 truncate monospace rounded px-2 inline-block mr-2 mt-2 cursor"
+        class="w-64 max-sm:w-40 truncate monospace rounded px-2 inline-block mr-2 mb-2 cursor"
         class:bg-blue-200={preference.weight > 0}
         class:bg-orange-200={preference.weight < 0}
         title={`${preference.file.basename}: ${preference.searchResult.text}`}

@@ -51,12 +51,16 @@
     return [page - 1, offset - positions[page - 1].char_index];
   }
 
+  // When true, highlights will scroll into view
+  let scrollHighlights = false;
+
   export function navigate(start: number, end: number) {
     selectedOffset = [start, end];
 
     // Jump to selection
     const [pageNumber, _] = getPageNumber(start);
     pageContainer.children[pageNumber].scrollIntoView();
+    scrollHighlights = true;
   }
 
   function updatePageNumber({
@@ -73,6 +77,9 @@
   function updateCurrentPage() {
     const windowHeight = window.innerHeight;
     for (const [pageNumber, page] of pageObjects) {
+      if (page == null) {
+        continue;
+      }
       const rect = page.getBoundingClientRect();
       if (rect.bottom >= windowHeight / 2) {
         currentPage = pageNumber + 1;
@@ -106,6 +113,7 @@
           {position}
           {selectedOffset}
           {zoom}
+          bind:scrollHighlights
           on:inview={(e) => updatePageNumber(e.detail)}
         />
       {/each}

@@ -15,6 +15,7 @@
   export let pageNumber: number;
   export let selectedOffset: Offset | null;
   export let zoom: number;
+  export let scrollHighlights: boolean;
   const marginPx = 16;
   let isInView = false;
   let isInViewForEnoughTime = false;
@@ -45,6 +46,13 @@
 >
   {#if isInView && isInViewForEnoughTime}
     <PdfPageImage {file} {pageNumber} scales={[0.25, 2]} />
-    <PdfChars {file} {position} {pageNumber} {selectedOffset} {zoom} />
+    <PdfChars
+      {file}
+      {position}
+      {pageNumber}
+      {selectedOffset}
+      {zoom}
+      bind:scrollHighlights
+    />
   {/if}
 </div>

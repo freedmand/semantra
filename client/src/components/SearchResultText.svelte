@@ -1,11 +1,9 @@
 <script lang="ts">
   import { inview, type Options } from "svelte-inview";
-  import type { SearchResult } from "../types";
+  import type { Highlight, SearchResult } from "../types";
+  import { explainDictionary, requestExplanation } from "../explainQueue";
 
-  interface Highlight {
-    text: string;
-    type: "highlight" | "normal";
-  }
+  let element: HTMLSpanElement;
 
   const options: Options = {
     rootMargin: "50px",
@@ -15,27 +13,15 @@
   export let searchResult: SearchResult;
   let highlights: Highlight[] | null = null;
 
-  let explaining = false;
+  $: params = {
+    filename: searchResult.filename,
+    offset: searchResult.offset,
+    queries: searchResult.queries,
+    preferences: searchResult.preferences,
+    text: text,
+  };
 
-  async function explain() {
-    if (explaining) {
-      return;
-    }
-    explaining = true;
-    const request = await fetch("/api/explain", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        filename: searchResult.filename,
-        offset: searchResult.offset,
-        queries: searchResult.queries,
-        preferences: searchResult.preferences,
-      }),
-    });
-    highlights = await request.json();
-  }
+  $: highlights = $explainDictionary[JSON.stringify(params)];
 
   let isInView = false;
   let inViewTimeout: number | null = null;
@@ -45,7 +31,7 @@
     if (isInView) {
       inViewTimeout = setTimeout(() => {
         isInViewForEnoughTime = true;
-        explain();
+        requestExplanation(element, params);
       }, 100);
     } else {
       isInViewForEnoughTime = false;
@@ -60,22 +46,23 @@
 <span
   use:inview={options}
   on:inview_change={(e) => (isInView = e.detail.inView)}
+  bind:this={element}
 >
-  {#if highlights === null}
-    {text}
+  {#if highlights == null}
+    <span>{text}</span>
   {:else}
     {#each highlights as highlight}
       {#if highlight.type === "highlight"}
-        <span class="highlight">{highlight.text}</span>
+        <span class="explain-highlight">{highlight.text}</span>
       {:else}
-        {highlight.text}
+        <span>{highlight.text}</span>
       {/if}
     {/each}
   {/if}
 </span>
 
 <style>
-  .highlight {
-    background-color: rgb(255 222 0 / 39%);
+  .explain-highlight {
+    background-color: rgb(154 134 0 / 18%);
   }
 </style>

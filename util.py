@@ -2,7 +2,6 @@ import struct
 import hashlib
 import os
 import numpy as np
-from annoy import AnnoyIndex
 
 HASH_LENGTH = 24
 
@@ -32,12 +31,12 @@ def get_tokens_filename(md5, config_hash):
     return f"{md5}.{config_hash}.tokens.json"
 
 
-def get_embeddings_filename(md5, config_hash, size, offset):
-    return f"{md5}.{config_hash}.{size}-{offset}.embeddings"
+def get_embeddings_filename(md5, config_hash, size, offset, rewind):
+    return f"{md5}.{config_hash}.{size}_{offset}_{rewind}.embeddings"
 
 
-def get_annoy_filename(md5, config_hash, size, offset, num_trees):
-    return f"{md5}.{config_hash}.{size}-{offset}.{num_trees}t.annoy"
+def get_annoy_filename(md5, config_hash, size, offset, rewind, num_trees):
+    return f"{md5}.{config_hash}.{size}_{offset}_{rewind}.{num_trees}t.annoy"
 
 
 def get_config_filename(md5, config_hash):
@@ -60,6 +59,9 @@ def read_embedding(chunk, num_dimensions):
 
 
 def write_annoy_db(filename, num_dimensions, embeddings, num_trees):
+    # Import annoy here so that it's not required for the CLI
+    from annoy import AnnoyIndex
+
     dbs = []
     db = AnnoyIndex(num_dimensions, "angular")
     for i, embedding in enumerate(embeddings):
@@ -72,6 +74,9 @@ def write_annoy_db(filename, num_dimensions, embeddings, num_trees):
 
 
 def load_annoy_db(filename, num_dimensions):
+    # Import annoy here so that it's not required for the CLI
+    from annoy import AnnoyIndex
+
     db = AnnoyIndex(num_dimensions, "angular")
     db.load(filename)
     return db
@@ -100,7 +105,9 @@ def get_num_embeddings(embeddings_filename, num_dimensions):
 
 def read_embeddings_file(embeddings_filename, num_dimensions, capacity):
     # Calculate the number of embeddings
-    num_embeddings = get_num_embeddings(embeddings_filename, num_dimensions)
+    num_embeddings = min(
+        get_num_embeddings(embeddings_filename, num_dimensions), capacity
+    )
 
     # Change the file size to the expected size
     with open(embeddings_filename, "ab") as f:
@@ -131,15 +138,18 @@ def get_offsets(doc_size, windows):
 
     offsets = []
 
-    for size, offset in windows:
+    for size, offset, rewind in windows:
         sub_offsets = []
         x = 0
         if offset > 0:
             sub_offsets.append([0, offset])
             num_tokens += offset
             x = offset
+        else:
+            x = rewind
 
         while x < doc_size:
+            x -= rewind
             sub_offsets.append([x, min(x + size, doc_size)])
             num_tokens += min(x + size, doc_size) - x
             x += size

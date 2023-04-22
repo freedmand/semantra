@@ -54,4 +54,13 @@ export interface PdfCharInfo {
   x1: number;
   y0: number;
   y1: number;
+  lpad?: number;
+  tpad?: number;
+  rpad?: number;
+  bpad?: number;
+}
+
+export interface Highlight {
+  text: string;
+  type: "highlight" | "normal";
 }

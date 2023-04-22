@@ -75,6 +75,7 @@
 
   let textView: TextView;
   let pdfView: PdfView;
+  let searchBar: SearchBar;
 
   export function parseQuery(query: string): ParsedQuery[] {
     // Parse the query
@@ -153,6 +154,7 @@
       }),
     });
     searchResultSet = await response.json();
+    sidebarExpanded = true;
     scrollSearchResultsToTop();
     unsearched = false;
   }
@@ -175,6 +177,7 @@
 
   function navigate() {
     if (pendingNavigation == null) return;
+    sidebarExpanded = false;
     if (textView) {
       textView.navigate(
         tokenOffsets[pendingNavigation.searchResult.offset[0]],
@@ -202,6 +205,7 @@
   function setPreference(preference: Preference) {
     preferences[preferenceKey(preference.file, preference.searchResult)] =
       preference;
+    if (searchBar != null) searchBar.scrollToBottomOfPreferences();
   }
 
   let sidebarExpanded = true;
@@ -215,6 +219,7 @@
   >
     <h1 class="text-3xl font-mono font-bold inline-flex pr-6 mt-1">Semantra</h1>
     <SearchBar
+      bind:this={searchBar}
       {preferences}
       on:setPreference={(e) => setPreference(e.detail)}
       on:search={(e) => handleSearch(e.detail)}
@@ -252,6 +257,23 @@
       {/if}
     </div>
   </article>
+  <footer class="bg-black text-white py-1 px-4 text-sm">
+    <a
+      class="underline mr-4"
+      href="https://github.com/freedmand/semantra/usage.md"
+      target="_blank">Help</a
+    >
+    <a
+      class="underline mr-4"
+      href="https://github.com/freedmand/semantra/tutorial.md"
+      target="_blank">Tutorial</a
+    >
+    <a
+      class="underline"
+      href="https://github.com/freedmand/semantra"
+      target="_blank">Source code</a
+    >
+  </footer>
 </main>
 
 <style>

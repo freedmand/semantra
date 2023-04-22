@@ -91,7 +91,7 @@
   >
 </div>
 <div
-  class="w-1/3 max-lg:w-64 bg-slate-100 max-sm:absolute max-sm:left-0 max-sm:right-8 max-sm:bottom-0 max-sm:top-0 max-sm:w-[calc(100%-8rem)] border-r-4 z-10 border-black flex flex-col items-stretch"
+  class="w-1/3 max-lg:w-64 bg-slate-100 max-sm:absolute max-sm:left-0 max-sm:right-8 max-sm:bottom-0 max-sm:top-0 max-sm:w-[calc(100%-8rem)] border-r-4 z-10 border-black flex flex-col items-stretch flex-shrink-0"
   class:hide={!sidebarExpanded}
 >
   <div class="flex items-center mb-2 pr-2 max-lg:flex-wrap">
@@ -105,13 +105,29 @@
     </div>
     <div class="flex-1 flex items-center relative px-2 mt-2" class:unsearched>
       <input
-        class="border border-black bg-white py-1 pl-8 font-mono rounded flex-1 w-32"
-        placeholder="Filter"
+        class="border border-black bg-white py-1 pl-8 font-mono rounded flex-1 w-40"
+        placeholder="Filter files"
         bind:value={filenameFilter}
       />
       <div class="filter-icon">Filter</div>
     </div>
     <div class="mt-2" class:unsearched>
+      {#if !excerptView}
+        <button
+          class="button toggle-detail-icon"
+          title="Toggle search results expanded/collapsed"
+          on:click={() => {
+            if (detailReverse) {
+              detailReverse = false;
+              filenameDetailClosed = {};
+            } else {
+              detailReverse = true;
+              filenameDetailClosed = {};
+            }
+          }}
+          >{#if detailReverse}Collapse all{:else}Expand all{/if}</button
+        >
+      {/if}
       <button
         class="button solo-icon"
         class:button-active={filterViewed}
@@ -133,22 +149,6 @@
           Show file view
         {:else}Show exercept view{/if}</button
       >
-      {#if !excerptView}
-        <button
-          class="button toggle-detail-icon"
-          title="Toggle search results expanded/collapsed"
-          on:click={() => {
-            if (detailReverse) {
-              detailReverse = false;
-              filenameDetailClosed = {};
-            } else {
-              detailReverse = true;
-              filenameDetailClosed = {};
-            }
-          }}
-          >{#if detailReverse}Collapse all{:else}Expand all{/if}</button
-        >
-      {/if}
     </div>
   </div>
   <div class="flex-1 relative">
@@ -214,15 +214,11 @@
           {/if}
         {/each}
       {/if}
-      <div class="m-2 font-mono">
-        {#if unsearched}Enter a search query above and click the search icon or
-          type “Enter”.{/if}
-        <a
-          class="font-bold underline"
-          href="https://github.com/freedmand/semantra/usage.md"
-          target="_blank">Help</a
-        >
-      </div>
+      {#if unsearched}
+        <div class="m-2 font-mono">
+          Enter a search query above and click the search icon or type “Enter”.
+        </div>
+      {/if}
     </div>
   </div>
 </div>
@@ -245,8 +241,8 @@
   .button {
     @apply border border-black rounded bg-white p-1;
     text-indent: -9999px;
-    width: 48px;
-    margin: 0 0 0 8px;
+    width: 42px;
+    margin: 0 0 0 4px;
     background-position: center;
     background-repeat: no-repeat;
   }
@@ -277,10 +273,11 @@
   }
 
   .hide {
-    display: none !important;
+    /* Breakpoint only */
+    @apply max-sm:!hidden;
   }
 
   .unsearched {
-    @apply pointer-events-none opacity-50 select-none;
+    @apply pointer-events-none opacity-20 select-none;
   }
 </style>
