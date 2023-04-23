@@ -140,3 +140,17 @@ semantra [OPTIONS] [FILENAME(S)]...
 No, and this is by design.
 
 Semantra does not use any generative models like ChatGPT. It is built only to query text semantically without any layers on top to attempt explaining, summarizing, or synthesizing results. Generative language models occasionally produce outwardly plausible but ultimately incorrect information, placing the burden of verification on the user. Semantra treats primary source material as the only source of truth and endeavors to show that a human-in-the-loop search experience on top of simpler embedding models is more serviceable to users.
+
+## Development
+
+The Python app is in `src/semantra/semantra.py` and is managed as a standard Python command-line project with `pyproject.toml`.
+
+The local web app is written in [Svelte](https://svelte.dev/) and managed as a standard npm application.
+
+To develop for the web app `cd` into `client` and then run `npm install`.
+
+To build the web app, run `npm run build`. The build the web app in watch mode and rebuild when there's changes, run `npm run build:watch`.
+
+## Contributions
+
+The app is still in early stages, but contributions are welcome. Please feel free to submit an issue for any bugs or feature requests.
