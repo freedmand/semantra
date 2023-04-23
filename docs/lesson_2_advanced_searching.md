@@ -4,11 +4,27 @@
 
 In this lesson, we'll work with a multi-document collection and learn how to utilize some of Semantra's more advanced features to refine our query.
 
-### Step 1: prepare the documents
+### Step 1: prepare and process the documents
 
 Download the following collection of U.S. presidential inaugural speeches:
 
-- [us_inaugural_speeches.zip (334 KB)](https://github.com/freedmand/semantra/raw/main/docs/example_docs/us_inaugural_speeches.pdf)
+- [us_inaugural_speeches.zip (334 KB)](https://github.com/freedmand/semantra/raw/main/docs/example_docs/us_inaugural_speeches.zip)
+
+Download the zip file somewhere on your computer and extract the contents to a folder (this can be done on most operating systems simply by opening the zip file and potentially clicking an extract button).
+
+The extracted documents should contain a list of `.txt` files containing speeches from George Washington's in 1789 to Joe Biden's in 2021.
+
+Note the location of the extracted files and run Semantra over all the `.txt` files:
+
+```sh
+semantra <path_to_speeches>/*.txt
+```
+
+It may take several minutes to process all the speeches, with helpful progress information to estimate the completion time.
+
+![Processing inaugural speeches](img/inaugural_speeches_processing.png)
+
+### Step 2: using the web app over document collections
 
 ### Step 5: a brief aside on embeddings
 
