@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "semantra"
+version = "0.0.9"
+description = "A semantic search CLI tool"
+authors = [{name = "Dylan Freedman", email = "freedmand@gmail.com"}]
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+  "annoy>=1.17.2",
+  "click>=8.1.3",
+  "Flask>=2.2.3",
+  "openai>=0.27.2",
+  "pypdfium2>=4.5.0",
+  "python-dotenv>=1.0.0",
+  "tiktoken>=0.3.3",
+  "torch>=2.0.0",
+  "tqdm>=4.65.0",
+  "transformers>=4.27.4"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/freedmand/semantra"
+"Repository" = "https://github.com/freedmand/semantra"
+"Bug Tracker" = "https://github.com/freedmand/semantra/issues"
+
+[project.scripts]
+semantra = "semantra.semantra:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+semantra = ["client_public"]

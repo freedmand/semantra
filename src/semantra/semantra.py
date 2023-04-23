@@ -4,12 +4,12 @@ from tqdm import tqdm
 import numpy as np
 from flask import Flask, request, jsonify, send_from_directory, send_file, make_response
 import click
-from models import models, BaseModel, TransformerModel, as_numpy
+from .models import models, BaseModel, TransformerModel, as_numpy
 import io
-from pdf import get_pdf_content
+from .pdf import get_pdf_content
 import math
 import hashlib
-from util import (
+from .util import (
     file_md5,
     get_tokens_filename,
     get_config_filename,
@@ -28,8 +28,7 @@ from util import (
 )
 import pkg_resources
 
-with open(pkg_resources.resource_filename("semantra", "VERSION"), "r") as f:
-    VERSION = f.read().strip()
+VERSION = pkg_resources.require("semantra")[0].version
 
 package_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -630,14 +629,16 @@ def main(
     @app.route("/")
     def base():
         return send_from_directory(
-            pkg_resources.resource_filename("semantra", "client/public"), "index.html"
+            pkg_resources.resource_filename("semantra.semantra", "client_public"),
+            "index.html",
         )
 
     # Path for all the static files (compiled JS/CSS, etc.)
     @app.route("/<path:path>")
     def home(path):
         return send_from_directory(
-            pkg_resources.resource_filename("semantra", "client/public"), path
+            pkg_resources.resource_filename("semantra.semantra", "client_public"),
+            path,
         )
 
     @app.route("/api/files", methods=["GET"])

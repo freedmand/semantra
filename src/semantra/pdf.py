@@ -3,7 +3,7 @@ from threading import Lock
 import json
 import os
 from tqdm import tqdm
-from util import get_converted_pdf_txt_filename, get_pdf_positions_filename
+from .util import get_converted_pdf_txt_filename, get_pdf_positions_filename
 
 mutexes = {}
 
