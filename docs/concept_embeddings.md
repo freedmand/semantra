@@ -1,6 +1,6 @@
 # Concepts: embeddings
 
-A base level of understanding about _embeddings_ will help more effectively work with Semantra. At its core, embeddings are numerical representations of meaning. And embedding models are machine learning models that take in text (or other media) and output these numerical embeddings.
+A base level of understanding about _embeddings_ will help you more effectively work with Semantra. At its core, embeddings are numerical representations of meaning. And embedding models are machine learning models that take in text (or other media) and output these numerical embeddings.
 
 Text embedding models are typically trained on terabytes of text encompassing many genres. From that data they become skilled at encoding text into meaning by inferring patterns.
 

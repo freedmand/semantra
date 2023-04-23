@@ -144,5 +144,5 @@ And so much more! If you find interesting or novel ways to use Semantra, let us 
 
 ## Next steps
 
-- Read the [concepts](concepts.md) guide
-- Check out some [recipes](recipes.md) for some additional tricks
+- Check out the [guides](guides.md)
+- Learn about some relevant [concepts](concepts.md)

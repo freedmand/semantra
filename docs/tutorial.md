@@ -68,3 +68,4 @@ It's time to use the tool!
 Now that Semantra is installed, let's start using it! We'll start by semantically searching Shakespeare:
 
 - [Lesson 1: Semantically Searching Shakespeare](lesson_1_semantically_searching_shakespeare.md)
+- [Lesson 2: Advanced searching across all U.S. presidential inagural speeches](lesson_2_advanced_searching.md)
