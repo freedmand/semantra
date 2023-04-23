@@ -7,7 +7,7 @@ import openai
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"))
 
 if "OPENAI_API_KEY" in os.environ:
     openai.api_key = os.getenv("OPENAI_API_KEY")
