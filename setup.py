@@ -27,7 +27,7 @@ setup(
     install_requires=requirements,
     python_requires=">=3.9",
     include_package_data=True,
-    package_data={"": ["client/public"]},
+    package_data={"": ["client/public", "VERSION"]},
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

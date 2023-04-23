@@ -28,7 +28,7 @@ from util import (
 )
 import pkg_resources
 
-with open("VERSION", "r") as f:
+with open(pkg_resources.resource_filename("semantra", "VERSION"), "r") as f:
     VERSION = f.read().strip()
 
 package_directory = os.path.dirname(os.path.abspath(__file__))
