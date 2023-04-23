@@ -1,5 +1,3 @@
-(Work-in-progress documentation; the tool is not yet ready)
-
 # Semantra
 
 Semantra is a multipurpose tool for semantically searching documents. Query by meaning rather than just by matching text.
