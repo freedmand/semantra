@@ -6,4 +6,5 @@ pypdfium2>=4.5.0
 python-dotenv>=1.0.0
 tiktoken>=0.3.3
 torch>=2.0.0
+tqdm>=4.65.0
 transformers>=4.27.4

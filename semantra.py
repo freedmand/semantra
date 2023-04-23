@@ -26,9 +26,12 @@ from util import (
     sort_results,
     HASH_LENGTH,
 )
+import pkg_resources
 
 with open("VERSION", "r") as f:
     VERSION = f.read().strip()
+
+package_directory = os.path.dirname(os.path.abspath(__file__))
 
 
 class Content:
@@ -626,12 +629,16 @@ def main(
 
     @app.route("/")
     def base():
-        return send_from_directory("client/public", "index.html")
+        return send_from_directory(
+            pkg_resources.resource_filename("semantra", "client/public"), "index.html"
+        )
 
     # Path for all the static files (compiled JS/CSS, etc.)
     @app.route("/<path:path>")
     def home(path):
-        return send_from_directory("client/public", path)
+        return send_from_directory(
+            pkg_resources.resource_filename("semantra", "client/public"), path
+        )
 
     @app.route("/api/files", methods=["GET"])
     def files():

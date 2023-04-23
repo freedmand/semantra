@@ -1,5 +1,4 @@
 from setuptools import setup, find_packages
-from setuptools.command.install import install
 
 with open("README.md", "r") as f:
     long_description = f.read()
@@ -10,20 +9,9 @@ with open("requirements.txt", "r") as f:
         if req.strip()
         and not req.strip().startswith("#")
         and not req.strip().startswith("-")
-        and not req.strip().startswith("torch")
-    ] + ["light-the-torch==0.7.2"]
+    ]
 with open("VERSION", "r") as f:
     version = f.read().strip()
-
-
-class PostInstallCommand(install):
-    """Post-installation for installation mode."""
-
-    def run(self):
-        install.run(self)
-        # Run `ltt install torch` to install torch
-        # TODO: figure out less hacky way to do this
-        self.spawn(["ltt", "install", "torch"])
 
 
 setup(
@@ -38,6 +26,8 @@ setup(
     packages=find_packages(),
     install_requires=requirements,
     python_requires=">=3.9",
+    include_package_data=True,
+    package_data={"": ["client/public"]},
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
@@ -47,8 +37,5 @@ setup(
         "console_scripts": [
             "semantra = semantra:main",
         ]
-    },
-    cmdclass={
-        "install": PostInstallCommand,
     },
 )
