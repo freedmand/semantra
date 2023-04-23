@@ -111,6 +111,11 @@ class OpenAIModel(BaseModel):
         num_dimensions=1536,
         tokenizer_name="cl100k_base",
     ):
+        # Check if OpenAI API key is set
+        if "OPENAI_API_KEY" not in os.environ:
+            raise Exception(
+                "OpenAI API key not set. Please set the OPENAI_API_KEY environment variable or create a `.env` file with the key in the same directory."
+            )
         self.model_name = model_name
         self.num_dimensions = num_dimensions
         self.tokenizer = tiktoken.get_encoding(tokenizer_name)
