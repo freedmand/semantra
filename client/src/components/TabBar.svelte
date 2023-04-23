@@ -14,7 +14,7 @@
       {#each files as file, i}
         <button
           {disabled}
-          class:active={i === index}
+          class:active-tab={i === index}
           class="text-xs rounded py-1 px-2 mr-2 border border-transparent"
           on:click={() => (index = i)}
         >
@@ -30,7 +30,7 @@
     scrollbar-width: thin;
   }
 
-  .active {
+  .active-tab {
     @apply bg-white border-black;
   }
 </style>

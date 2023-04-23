@@ -1,9 +1,9 @@
 from setuptools import setup, find_packages
 from setuptools.command.install import install
 
-with open("README.md", "r", encoding="utf-8") as f:
+with open("README.md", "r") as f:
     long_description = f.read()
-with open("requirements.txt", "r", encoding="utf-8") as f:
+with open("requirements.txt", "r") as f:
     requirements = [
         req.strip()
         for req in f.read().splitlines()
@@ -12,6 +12,8 @@ with open("requirements.txt", "r", encoding="utf-8") as f:
         and not req.strip().startswith("-")
         and not req.strip().startswith("torch")
     ] + ["light-the-torch==0.7.2"]
+with open("VERSION", "r") as f:
+    version = f.read().strip()
 
 
 class PostInstallCommand(install):
@@ -26,7 +28,7 @@ class PostInstallCommand(install):
 
 setup(
     name="semantra",
-    version="0.0.1",
+    version=version,
     description="A semantic search CLI tool",
     long_description=long_description,
     url="https://github.com/freedmand/semantra",

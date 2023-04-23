@@ -175,7 +175,7 @@
 
   let pendingNavigation: Navigation | null = null;
 
-  function navigate() {
+  async function navigate() {
     if (pendingNavigation == null) return;
     sidebarExpanded = false;
     if (textView) {
@@ -190,6 +190,15 @@
       );
     }
     pendingNavigation = null;
+
+    await tick();
+    // Scroll active tab into view
+    const activeTab = document.querySelector(".active-tab");
+    if (activeTab) {
+      activeTab.scrollIntoView({
+        inline: "center",
+      });
+    }
   }
 
   async function jumpToResult(result: Navigation) {

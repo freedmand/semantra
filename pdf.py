@@ -2,7 +2,7 @@ import pypdfium2 as pdfium
 from threading import Lock
 import json
 import os
-import tqdm
+from tqdm import tqdm
 from util import get_converted_pdf_txt_filename, get_pdf_positions_filename
 
 mutexes = {}
@@ -46,7 +46,7 @@ class PDFContent:
 LINE_FEED = "\f"
 
 
-def get_pdf_content(md5, filename, semantra_dir, force):
+def get_pdf_content(md5, filename, semantra_dir, force, silent):
     converted_txt = os.path.join(semantra_dir, get_converted_pdf_txt_filename(md5))
     position_index = os.path.join(semantra_dir, get_pdf_positions_filename(md5))
 
@@ -58,7 +58,12 @@ def get_pdf_content(md5, filename, semantra_dir, force):
         position = 0
         # newline="" ensures pdfium's \r is preserved
         with open(converted_txt, "w", newline="") as f:
-            for page_index in tqdm.tqdm(range(n_pages), desc="Extracting PDF contents"):
+            for page_index in tqdm(
+                range(n_pages),
+                desc="Extracting PDF contents",
+                leave=False,
+                disable=silent,
+            ):
                 page = pdf[page_index]
                 page_width, page_height = page.get_size()
                 textpage = page.get_textpage()

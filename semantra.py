@@ -1,6 +1,6 @@
 import json
 import os
-import tqdm
+from tqdm import tqdm
 import numpy as np
 from flask import Flask, request, jsonify, send_from_directory, send_file, make_response
 import click
@@ -27,7 +27,8 @@ from util import (
     HASH_LENGTH,
 )
 
-SEMANTRA_VERSION = "0.0.1"
+with open("VERSION", "r") as f:
+    VERSION = f.read().strip()
 
 
 class Content:
@@ -37,9 +38,9 @@ class Content:
         self.filetype = "text"
 
 
-def get_text_content(md5, filename, semantra_dir, force):
+def get_text_content(md5, filename, semantra_dir, force, silent):
     if filename.endswith(".pdf"):
-        return get_pdf_content(md5, filename, semantra_dir, force)
+        return get_pdf_content(md5, filename, semantra_dir, force, silent)
 
     with open(filename, "r", encoding="utf-8", errors="ignore") as f:
         rawtext = f.read()
@@ -80,7 +81,7 @@ class Document:
 
     @property
     def content(self):
-        return get_text_content(self.md5, self.filename, self.semantra_dir, False)
+        return get_text_content(self.md5, self.filename, self.semantra_dir, False, True)
 
     @property
     def text_chunks(self):
@@ -120,11 +121,9 @@ def process(
     pool_count,
     pool_size,
     force,
+    silent,
+    no_confirm,
 ):
-    print("Processing", filename)
-    if semantra_dir is None:
-        semantra_dir = os.path.join(os.path.expanduser("~"), ".semantra")
-
     # Check if semantra dir exists
     if not os.path.exists(semantra_dir):
         os.makedirs(semantra_dir)
@@ -139,11 +138,10 @@ def process(
     tokens_filename = os.path.join(semantra_dir, get_tokens_filename(md5, config_hash))
     config_filename = os.path.join(semantra_dir, get_config_filename(md5, config_hash))
 
-    print("Loading text chunks...")
     should_calculate_tokens = True
     if force or not os.path.exists(tokens_filename):
         # Calculate tokens to get text chunks
-        content = get_text_content(md5, filename, semantra_dir, force)
+        content = get_text_content(md5, filename, semantra_dir, force, silent)
         text = content.rawtext
         tokens = model.get_tokens(text)
         should_calculate_tokens = False
@@ -175,9 +173,15 @@ def process(
         "num_embedding_tokens": num_embedding_tokens,
         "use_annoy": use_annoy,
         "num_annoy_trees": num_annoy_trees,
-        "semantra_version": SEMANTRA_VERSION,
+        "semantra_version": VERSION,
     }
-    print(full_config)
+
+    if force or not os.path.exists(config_filename):
+        if cost_per_token is not None and not no_confirm:
+            click.confirm(
+                f"Tokens will cost ${num_embedding_tokens * cost_per_token:.2f}. Proceed?",
+                abort=True,
+            )
 
     # Write out the config every time
     with open(config_filename, "w") as f:
@@ -185,7 +189,12 @@ def process(
 
     embeddings_filenames = []
     annoy_filenames = []
-    with tqdm.tqdm(total=num_embedding_tokens) as pbar:
+    with tqdm(
+        total=num_embedding_tokens,
+        desc="Calculating embeddings",
+        leave=False,
+        disable=silent,
+    ) as pbar:
         for (size, offset, rewind), sub_offsets in zip(windows, offsets):
             embeddings_filename = os.path.join(
                 semantra_dir,
@@ -246,7 +255,10 @@ def process(
                     nonlocal pool, pool_token_count, embeddings, embedding_index, f
 
                     if len(pool) > 0:
-                        embedding_results = model.embed(tokens, pool).cpu()
+                        embedding_results = model.embed(tokens, pool)
+                        # Call .cpu if embedding_results contains it
+                        if hasattr(embedding_results, "cpu"):
+                            embedding_results = embedding_results.cpu()
                         embeddings[
                             embedding_index : embedding_index + len(pool)
                         ] = embedding_results
@@ -320,11 +332,11 @@ def process_windows(windows: str) -> "list[tuple[int, int, int]]":
 
 
 @click.command()
-@click.argument("filename", type=click.Path(exists=True), required=True, nargs=-1)
+@click.argument("filename", type=click.Path(exists=True), nargs=-1)
 @click.option(
     "--model",
     type=click.Choice(models.keys(), case_sensitive=True),
-    default="minilm",
+    default="mpnet",
     show_default=True,
     help="Preset model to use for embedding",
 )
@@ -339,6 +351,13 @@ def process_windows(windows: str) -> "list[tuple[int, int, int]]":
     default="128_0_16",
     show_default=True,
     help='Embedding windows to extract. A comma-separated list of the format "size[_offset=0][_rewind=0]. A window with size 128, offset 0, and rewind of 16 (128_0_16) will embed the document in chunks of 128 tokens which partially overlap by 16. Only the first window is used for search.',
+)
+@click.option(
+    "--no-server",
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help="Do not start the UI server (only process)",
 )
 @click.option(
     "--port",
@@ -450,6 +469,36 @@ def process_windows(windows: str) -> "list[tuple[int, int, int]]":
     "--force", is_flag=True, default=False, help="Force process even if cached"
 )
 @click.option(
+    "--silent",
+    is_flag=True,
+    default=False,
+    help="Do not print progress information",
+)
+@click.option(
+    "--no-confirm",
+    is_flag=True,
+    default=False,
+    help="Do not show cost and ask for confirmation before processing with OpenAI",
+)
+@click.option(
+    "--version",
+    is_flag=True,
+    default=False,
+    help="Print version and exit",
+)
+@click.option(
+    "--list-models",
+    is_flag=True,
+    default=False,
+    help="List preset models and exit",
+)
+@click.option(
+    "--show-semantra-dir",
+    is_flag=True,
+    default=False,
+    help="Print the directory semantra will use to store processed files and exit",
+)
+@click.option(
     "--semantra-dir",
     type=click.Path(exists=False),
     default=None,
@@ -458,6 +507,7 @@ def process_windows(windows: str) -> "list[tuple[int, int, int]]":
 def main(
     filename,
     windows="128_0_16",
+    no_server=False,
     port=8080,
     host="0.0.0.0",
     pool_size=None,
@@ -466,7 +516,7 @@ def main(
     doc_token_post=None,
     query_token_pre=None,
     query_token_post=None,
-    model="minilm",
+    model="mpnet",
     transformer_model=None,
     num_annoy_trees=100,
     num_results=10,
@@ -477,8 +527,32 @@ def main(
     explain_split_divide=6,
     num_explain_highlights=2,
     force=False,
+    silent=False,
+    no_confirm=False,
+    version=False,
+    list_models=False,
+    show_semantra_dir=False,
     semantra_dir=None,  # auto
 ):
+    if version:
+        print(VERSION)
+        return
+
+    if list_models:
+        for model_name in models:
+            print(f"- {model_name}")
+        return
+
+    if semantra_dir is None:
+        semantra_dir = click.get_app_dir("Semantra")
+
+    if show_semantra_dir:
+        print(semantra_dir)
+        return
+
+    if filename is None or len(filename) == 0:
+        raise click.UsageError("Must provide a filename to process/query")
+
     processed_windows = list(process_windows(windows))
 
     if transformer_model is not None:
@@ -511,8 +585,11 @@ def main(
             "Please use a symmetric model or kNN."
         )
 
-    documents = {
-        fn: process(
+    documents = {}
+    pbar = tqdm(filename, disable=silent)
+    for fn in pbar:
+        pbar.set_description(f"{os.path.basename(fn)}")
+        documents[fn] = process(
             filename=fn,
             semantra_dir=semantra_dir,
             model=model,
@@ -524,9 +601,9 @@ def main(
             pool_count=pool_count,
             pool_size=pool_size,
             force=force,
+            silent=silent,
+            no_confirm=no_confirm,
         )
-        for fn in filename
-    }
 
     cached_content = None
     cached_content_filename = None
@@ -819,7 +896,8 @@ def main(
         filename = request.args.get("filename")
         return jsonify(documents[filename].text_chunks)
 
-    app.run(host=host, port=port)
+    if not no_server:
+        app.run(host=host, port=port)
 
 
 if __name__ == "__main__":
