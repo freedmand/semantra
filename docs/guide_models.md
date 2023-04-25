@@ -24,7 +24,7 @@ If the nature of your work is sensitive in any way, you may not want anything go
 
 OpenAI's model is very powerful and able to encode nuanced semantic meanings but in practice it is not significantly more useful than models that can be run locally in combination with Semantra's advanced features. OpenAI's model is fast at processing large documents and it offloads processing to their servers, so if your computer is slow or you have an enormous amount of documents and want to get through them quickly, OpenAI's model may work well.
 
-Lastly, OpenAI's model costs money to use. The cost is pretty small but adds up if you are processing large collections of documents. See [the OpenAI guide](guide_models.md) for more information.
+Lastly, OpenAI's model costs money to use. The cost is pretty small but adds up if you are processing large collections of documents. See [the OpenAI guide](guide_openai.md) for more information.
 
 ## Using custom models
 
