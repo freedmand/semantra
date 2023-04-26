@@ -1,10 +1,6 @@
 # Semantra
 
-
-
 https://user-images.githubusercontent.com/306095/233867821-601db8b0-19c6-4bae-8e93-720b324dc199.mov
-
-
 
 Semantra is a multipurpose tool for semantically searching documents. Query by meaning rather than just by matching text.
 
@@ -155,7 +151,7 @@ The local web app is written in [Svelte](https://svelte.dev/) and managed as a s
 
 To develop for the web app `cd` into `client` and then run `npm install`.
 
-To build the web app, run `npm run build`. The build the web app in watch mode and rebuild when there's changes, run `npm run build:watch`.
+To build the web app, run `npm run build`. To build the web app in watch mode and rebuild when there's changes, run `npm run build:watch`.
 
 ## Contributions
 
