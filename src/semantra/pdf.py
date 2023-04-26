@@ -57,7 +57,7 @@ def get_pdf_content(md5, filename, semantra_dir, force, silent):
         positions = []
         position = 0
         # newline="" ensures pdfium's \r is preserved
-        with open(converted_txt, "w", newline="") as f:
+        with open(converted_txt, "w", newline="", encoding='utf-8', errors='ignore') as f:
             for page_index in tqdm(
                 range(n_pages),
                 desc="Extracting PDF contents",
@@ -78,15 +78,15 @@ def get_pdf_content(md5, filename, semantra_dir, force, silent):
                 )
                 position += f.write(pagetext)
                 position += f.write(LINE_FEED)
-        with open(position_index, "w") as f:
+        with open(position_index, "w", encoding='utf-8', errors='ignore') as f:
             json.dump(positions, f)
-        with open(converted_txt, "r", newline="") as f:
+        with open(converted_txt, "r", newline="", encoding='utf-8', errors='ignore') as f:
             rawtext = f.read()
         return PDFContent(rawtext, filename, positions)
     else:
-        with open(converted_txt, "r", newline="") as f:
+        with open(converted_txt, "r", newline="", encoding='utf-8', errors='ignore') as f:
             rawtext = f.read()
-        with open(position_index, "r") as f:
+        with open(position_index, "r", encoding='utf-8', errors='ignore') as f:
             positions = json.load(f)
 
         return PDFContent(rawtext, filename, positions)
