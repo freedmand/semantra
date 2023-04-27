@@ -269,12 +269,12 @@
   <footer class="bg-black text-white py-1 px-4 text-sm">
     <a
       class="underline mr-4"
-      href="https://github.com/freedmand/semantra/docs/help.md"
+      href="https://github.com/freedmand/semantra/blob/main/docs/help.md"
       target="_blank">Help</a
     >
     <a
       class="underline mr-4"
-      href="https://github.com/freedmand/semantra/docs/tutorial.md"
+      href="https://github.com/freedmand/semantra/blob/main/docs/tutorial.md"
       target="_blank">Tutorial</a
     >
     <a

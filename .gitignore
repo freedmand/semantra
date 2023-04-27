@@ -8,3 +8,6 @@ dist
 venv
 build
 !client/public/build
+client/public/config
+client/public/content
+client/public/models
