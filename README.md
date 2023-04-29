@@ -109,6 +109,7 @@ semantra [OPTIONS] [FILENAME(S)]...
 - `--model [openai|minilm|mpnet|sgpt|sgpt-1.3B]`: Preset model to use for embedding. See [the models guide](docs/guide_models.md) for more info (default: mpnet)
 - `--transformer-model TEXT`: Custom Huggingface transformers model name to use for embedding (only one of `--model` and `--transformer-model` should be specified). See [the models guide](docs/guide_models.md) for more info
 - `--windows TEXT`: Embedding windows to extract. A comma-separated list of the format "size[\_offset=0][_rewind=0]. A window with size 128, offset 0, and rewind of 16 (128_0_16) will embed the document in chunks of 128 tokens which partially overlap by 16. Only the first window is used for search. See the [windows concept doc](docs/concept_windows.md) for more information (default: 128_0_16)
+- `--encoding`: Encoding to use for reading text files [default: utf-8]
 - `--no-server`: Do not start the UI server (only process)
 - `--port INTEGER`: Port to use for embedding server (default: 8080)
 - `--host TEXT`: Host to use for embedding server (default: 0.0.0.0)
