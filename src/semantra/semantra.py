@@ -29,6 +29,7 @@ from .util import (
 import pkg_resources
 
 VERSION = pkg_resources.require("semantra")[0].version
+DEFAULT_ENCODING = "utf-8"
 
 package_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -40,11 +41,11 @@ class Content:
         self.filetype = "text"
 
 
-def get_text_content(md5, filename, semantra_dir, force, silent):
+def get_text_content(md5, filename, semantra_dir, force, silent, encoding):
     if filename.endswith(".pdf"):
         return get_pdf_content(md5, filename, semantra_dir, force, silent)
 
-    with open(filename, "r", encoding="utf-8", errors="ignore") as f:
+    with open(filename, "r", encoding=encoding, errors="ignore") as f:
         rawtext = f.read()
         return Content(rawtext, filename)
 
@@ -67,6 +68,7 @@ class Document:
         offsets,
         tokens_filename,
         num_dimensions,
+        encoding,
     ):
         self.filename = filename
         self.md5 = md5
@@ -80,10 +82,13 @@ class Document:
         self.offsets = offsets
         self.tokens_filename = tokens_filename
         self.num_dimensions = num_dimensions
+        self.encoding = encoding
 
     @property
     def content(self):
-        return get_text_content(self.md5, self.filename, self.semantra_dir, False, True)
+        return get_text_content(
+            self.md5, self.filename, self.semantra_dir, False, True, self.encoding
+        )
 
     @property
     def text_chunks(self):
@@ -125,6 +130,7 @@ def process(
     force,
     silent,
     no_confirm,
+    encoding,
 ):
     # Check if semantra dir exists
     if not os.path.exists(semantra_dir):
@@ -134,6 +140,8 @@ def process(
     md5 = file_md5(filename)
     base_filename = os.path.basename(filename)
     config = model.get_config()
+    if encoding != DEFAULT_ENCODING:
+        config["encoding"] = encoding
     config_hash = hashlib.shake_256(json.dumps(config).encode()).hexdigest(HASH_LENGTH)
 
     # File names
@@ -143,7 +151,7 @@ def process(
     should_calculate_tokens = True
     if force or not os.path.exists(tokens_filename):
         # Calculate tokens to get text chunks
-        content = get_text_content(md5, filename, semantra_dir, force, silent)
+        content = get_text_content(md5, filename, semantra_dir, force, silent, encoding)
         text = content.rawtext
         tokens = model.get_tokens(text)
         should_calculate_tokens = False
@@ -316,6 +324,7 @@ def process(
         offsets=offsets,
         tokens_filename=tokens_filename,
         num_dimensions=num_dimensions,
+        encoding=encoding,
     )
 
 
@@ -341,6 +350,13 @@ def process_windows(windows: str) -> "list[tuple[int, int, int]]":
     default="mpnet",
     show_default=True,
     help="Preset model to use for embedding",
+)
+@click.option(
+    "--encoding",
+    type=str,
+    default=DEFAULT_ENCODING,
+    show_default=True,
+    help="Encoding to use for reading text files",
 )
 @click.option(
     "--transformer-model",
@@ -520,6 +536,7 @@ def main(
     query_token_post=None,
     model="mpnet",
     transformer_model=None,
+    encoding=DEFAULT_ENCODING,
     num_annoy_trees=100,
     num_results=10,
     annoy=True,
@@ -605,6 +622,7 @@ def main(
             force=force,
             silent=silent,
             no_confirm=no_confirm,
+            encoding=encoding,
         )
 
     cached_content = None
