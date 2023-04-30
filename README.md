@@ -52,6 +52,12 @@ You can run Semantra over multiple documents, too:
 semantra report.pdf book.txt
 ```
 
+You may run Semantra by using the following command in shell to index all files in a folder:
+
+```sh
+folder_path="/path/to/folder/"; find "$folder_path" -type f -exec semantra {} +
+```
+
 Semantra will take some time to process the input documents. This is a one-time operation per document (subsequent runs over the same document collection will be near instantaneous).
 
 Once processing is complete, Semantra will launch a local webserver, by default at [localhost:8080](http://localhost:8080). On this web page, you can interactively query the passed in documents semantically.
