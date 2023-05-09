@@ -1,159 +1,164 @@
+> NOTA: Esta es una versión traducida al español y podría estar desactualizada con respecto al original README.
+> 
+> NOTE: This is a translated version and may be outdated with the original README.
+
+
 # Semantra
 
 https://user-images.githubusercontent.com/306095/233867821-601db8b0-19c6-4bae-8e93-720b324dc199.mov
 
-Semantra is a multipurpose tool for semantically searching documents. Query by meaning rather than just by matching text.
+Semantra es una herramienta multipropósito para la búsqueda semántica de documentos. Consulta por significado en lugar de solo por coincidencia de texto.
 
-The tool, made to run on the command line, analyzes specified text and PDF files on your computer and launches a local web search application for interactively querying them. The purpose of Semantra is to make running a specialized semantic search engine easy, friendly, configurable, and private/secure.
+La herramienta, creada para ejecutarse en la interfaz de la línea de comandos, analiza los archivos de texto y PDF especificados en su computadora y lanza una aplicación de búsqueda web local para consultarlos de forma interactiva. El propósito de Semantra es hacer que el funcionamiento de un motor de búsqueda semántico especializado sea fácil, amigable, configurable y privado/seguro.
 
-Semantra is built for individuals seeking needles in haystacks — journalists sifting through leaked documents on deadline, researchers seeking insights within papers, students engaging with literature by querying themes, historians connecting events across books, and so forth.
+Semantra está diseñado para personas que buscan agujas en un pajar: periodistas que analizan documentos filtrados en la fecha límite, investigadores que buscan información dentro de los artículos, estudiantes que se involucran con la literatura consultando temas, historiadores que conectan eventos en libros, etc.
 
-## Resources
+## Recursos
 
-- [Tutorial](docs/tutorial.md): a gentle introduction to getting started with Semantra — everything from installing the tool to hands-on examples of analyzing documents with it
-- [Guides](docs/guides.md): practical guides on how to do more with Semantra
-- [Concepts](docs/concepts.md): Explainers on some concepts to better understand how Semantra works
-- [Using the web interface](docs/help.md): A reference on how to use the Semantra web app
+- [Tutorial](docs/tutorial.md): Una breve introducción para comenzar con Semantra: desde la instalación de la herramienta, hasta ejemplos prácticos de análisis de documentos con ella.
+- [Guías](docs/guides.md): Guías prácticas sobre cómo hacer más con Semantra.
+- [Conceptos](docs/concepts.md): Explicaciones sobre algunos conceptos para comprender mejor cómo funciona Semantra.
+- [Uso de la interfaz web](docs/help.md): Una referencia sobre cómo usar la aplicación web Semantra.
 
-This page gives a high-level overview of Semantra and a reference of its features.
+Esta página ofrece una descripción general de alto nivel de Semantra y una referencia de sus características.
 
-## Installation
+## Instalación
 
-Ensure you have [Python >= 3.9](https://www.python.org/downloads/).
+Asegúrese de tener [Python >= 3.9](https://www.python.org/downloads/).
 
-The easiest way to install Semantra is via `pipx`. If you do not have `pipx` installed, run:
+La forma más fácil de instalar Semantra es a través de `pipx`. Si no tiene `pipx` instalado, ejecute en el terminal:
 
 ```sh
 python3 -m pip install --user pipx
 python3 -m pipx ensurepath
 ```
 
-Open a new terminal window for the new path settings `pipx` sets to go into effect. Then run:
+Abra una nueva ventana de terminal para que entren en vigor los nuevos ajustes de ruta `pipx`. Entonces corra:
 
 ```sh
 pipx install semantra
 ```
 
-This will install Semantra on your path. You should be able to run `semantra` in the terminal and see output.
+Esto instalará Semantra en su directorio. Debería poder ejecutar `semantra` en el terminal y ver el resultado.
 
-## Usage
+## Uso
 
-Semantra operates on collections of documents — text or PDF files — stored on your local computer.
+Semantra opera en colecciones de documentos (archivos de texto o PDF) almacenados en su computadora local.
 
-At its simplest, you can run Semantra over a single document by running:
+En su forma más simple, puede ejecutar Semantra sobre un solo documento ejecutando:
 
 ```sh
 semantra doc.pdf
 ```
 
-You can run Semantra over multiple documents, too:
+También puede ejecutar Semantra en varios documentos:
 
 ```sh
 semantra report.pdf book.txt
 ```
 
-Semantra will take some time to process the input documents. This is a one-time operation per document (subsequent runs over the same document collection will be near instantaneous).
+Semantra tardará un tiempo en procesar los documentos de entrada. Esta es una operación única por documento (las ejecuciones posteriores sobre la misma colección de documentos serán casi instantáneas).
 
-Once processing is complete, Semantra will launch a local webserver, by default at [localhost:8080](http://localhost:8080). On this web page, you can interactively query the passed in documents semantically.
+Una vez que se complete el procesamiento, Semantra iniciará un servidor web local, de manera predeterminada en [localhost:8080](http://localhost:8080). En esta página web, puede consultar de forma interactiva los documentos transmitidos semánticamente.
 
-**Quick notes:**
+**Notas rápidas:**
 
-When you first run Semantra, it may take several minutes and several hundred megabytes of hard disk space to download a local machine learning model that can process the document you passed in. [The model used can be customized](docs/guide_models.md), but the default one is a great mix of being fast, lean, and effective.
+Cuando ejecuta Semantra por primera vez, puede tomar varios minutos y varios cientos de megabytes de espacio en el disco duro para descargar un modelo de aprendizaje automático local que pueda procesar el documento que desea consultar. [El modelo utilizado se puede personalizar] (docs/guide_models.md) , pero el predeterminado es una excelente combinación al ser rápido, ágil y efectivo.
 
-If you want to process documents quickly without using your own computational resources and don't mind paying or sharing data with external services, you can use [OpenAI's embedding model](docs/guide_openai.md).
+Si desea procesar documentos rápidamente sin usar sus propios recursos computacionales y no le importa pagar o compartir datos con servicios externos, puede usar [el modelo de incrustación de OpenAI] (docs/guide_openai.md).
 
-## Quick tour of the web app
+## Recorrido rápido por la aplicación web
 
-When you first navigate to the Semantra web interface, you will see a screen like this:
+Cuando navegue por primera vez a la interfaz web de Semantra, verá una pantalla como esta:
 
-![Semantra web interface](docs/img/initial_screen.png)
+![Interfaz web de Semantra](docs/img/initial_screen.png)
 
-Type in something in the search box to start querying semantically. Hit <kbd>Enter</kbd> or click the search icon to execute the query.
+Escriba algo en el cuadro de búsqueda para comenzar a consultar semánticamente. Pulse <kbd>Enter</kbd> o haga clic en el icono de búsqueda para ejecutar la consulta.
 
-Search results will appear in the left pane ordered by most relevant documents:
+Los resultados de la búsqueda aparecerán en el panel izquierdo ordenados por los documentos más relevantes:
 
-![Semantra search results](docs/img/resultspane.png)
+![Resultados de búsqueda de Semantra](docs/img/resultspane.png)
 
-The yellow scores show relevance from 0-1.00. Anything in the 0.50 range indicates a strong match. Lighter brown highlights will stream in over the search results explaining the most relevant portions to your query.
+Los puntajes amarillos muestran relevancia de 0-1.00. Cualquier resultado en el rango de 0,50 indica una fuerte coincidencia. Los párrafos resaltados de color marrón claro aparecerán en los resultados de la búsqueda y explicarán las partes más relevantes de su consulta.
 
-Clicking on a search result's text will navigate to the relevant section of the associated document.
+Al hacer clic en el texto de un resultado de búsqueda, se navegará a la sección correspondiente del documento asociado.
 
-![Highlighted search result in document](docs/img/contentwindow_pdf.png)
+![Resultado de búsqueda resaltado en el documento](docs/img/contentwindow_pdf.png)
 
-Clicking on the plus/minus buttons associated with a search result will positively/negatively tag those results. Re-running the query will cause these additional query parameters to go into effect.
+Al hacer clic en los botones más/menos asociados con un resultado de búsqueda, se etiquetarán de manera positiva/negativa esos resultados. Al volver a ejecutar la consulta hará que estos parámetros de consulta adicionales entren en vigor.
 
-![Positively/negatively tagging search results](docs/img/inaugural_speeches_healthcare_plus_minus.png)
+![Etiquetado positivo/negativo de resultados de búsqueda](docs/img/inaugural_speeches_healthcare_plus_minus.png)
 
-Finally, text queries can be added and subtracted with plus/minus signs in the query text to sculpt a precise semantic meaning.
+Finalmente, las consultas de texto se pueden sumar y restar con signos más/menos en el texto de la consulta para esculpir un significado semántico preciso.
 
-![Adding and subtracting text queries](docs/img/inaugural_speeches_economic_capitalism_war.png)
+![Consultas de adición y sustracción de texto](docs/img/inaugural_speeches_economic_capitalism_war.png)
 
-For a more in-depth walkthrough of the web app, check out the [tutorial](docs/tutorial.md) or [the web app reference](docs/help.md).
+Para obtener un recorrido más detallado de la aplicación web, consulte el [tutorial](docs/tutorial.md) o [la referencia de la aplicación web](docs/help.md).
 
-## Quick concepts
+## Conceptos rápidos
 
-Using a semantic search engine is fundamentally different than an exact text matching algorithm.
+El uso de un motor de búsqueda semántica es fundamentalmente diferente a un algoritmo de coincidencia de texto exacto.
 
-For starters, there will _always_ be search results for a given query, no matter how irrelevant it is. The scores may be really low, but the results will never disappear entirely. This is because semantic searching with query arithmetic often reveals useful results amid very minor score differences. The results will always be sorted by relevance and only the top 10 results per document are shown so the lower scoring results are cut off automatically.
+Para empezar, _siempre_ habrán resultados de búsqueda para una consulta determinada, sin importar cuán irrelevante sea. Las puntuaciones pueden ser realmente bajas, pero los resultados nunca desaparecerán por completo. Esto se debe a que la búsqueda semántica con aritmética de consulta a menudo revela resultados útiles en medio de diferencias de puntuación muy pequeñas. Los resultados siempre se ordenarán por relevancia y solo se mostrarán los 10 mejores resultados por documento, por lo que los resultados con menor puntuación se eliminarán automáticamente.
 
-Another difference is that Semantra will not necessarily find exact text matches if you query something that directly appears in the document. At a high level, this is because words can mean different things in different contexts, e.g. the word "leaves" can refer to the leaves on trees or to someone _leaving_. The embedding models that Semantra uses convert all the text and queries you enter into long sequences of numbers that can be mathematically compared, and an exact substring match is not always significant in this sense. See [the embeddings concept doc](docs/concept_embeddings.md) for more information on embeddings.
+Otra diferencia es que Semantra no necesariamente encontrará coincidencias de texto exactas si consulta algo que aparece directamente en el documento. En un nivel alto, esto se debe a que las palabras pueden significar diferentes cosas en diferentes contextos, por ejemplo, la palabra "hojas" puede referirse a las hojas de los árboles o a las páginas de un libro _(en la versión original en inglés el ejemplo seleccionado por el autor de la aplicación es el siguiente: the word "leaves" can refer to the leaves on trees or to someone leaving)_. Los modelos de incrustación que utiliza Semantra convierten todo el texto y las consultas que ingresa en largas secuencias de números que se pueden comparar matemáticamente, y una coincidencia de subcadena exacta no siempre es significativa en este sentido. Consulte [el documento sobre el concepto de incrustaciones](docs/concept_embeddings.md) para obtener más información sobre incrustaciones _(embeddings)_.
 
-## Command-line reference
+## Referencia de la línea de comandos
 
 ```sh
 semantra [OPTIONS] [FILENAME(S)]...
 ```
 
-## Options
+## Opciones
 
-- `--model [openai|minilm|mpnet|sgpt|sgpt-1.3B]`: Preset model to use for embedding. See [the models guide](docs/guide_models.md) for more info (default: mpnet)
-- `--transformer-model TEXT`: Custom Huggingface transformers model name to use for embedding (only one of `--model` and `--transformer-model` should be specified). See [the models guide](docs/guide_models.md) for more info
-- `--windows TEXT`: Embedding windows to extract. A comma-separated list of the format "size[\_offset=0][_rewind=0]. A window with size 128, offset 0, and rewind of 16 (128_0_16) will embed the document in chunks of 128 tokens which partially overlap by 16. Only the first window is used for search. See the [windows concept doc](docs/concept_windows.md) for more information (default: 128_0_16)
-- `--encoding`: Encoding to use for reading text files [default: utf-8]
-- `--no-server`: Do not start the UI server (only process)
-- `--port INTEGER`: Port to use for embedding server (default: 8080)
-- `--host TEXT`: Host to use for embedding server (default: 0.0.0.0)
-- `--pool-size INTEGER`: Max number of embedding tokens to pool together in requests
-- `--pool-count INTEGER`: Max number of embeddings to pool together in requests
-- `--doc-token-pre TEXT`: Token to prepend to each document in transformer models (default: None)
-- `--doc-token-post TEXT`: Token to append to each document in transformer models (default: None)
-- `--query-token-pre TEXT`: Token to prepend to each query in transformer models (default: None)
-- `--query-token-post TEXT`: Token to append to each query in transformer models (default: None)
-- `--num-results INTEGER`: Number of results (neighbors) to retrieve per file for queries (default: 10)
-- `--annoy`: Use approximate kNN via Annoy for queries (faster querying at a slight cost of accuracy); if false, use exact exhaustive kNN (default: True)
-- `--num-annoy-trees INTEGER`: Number of trees to use for approximate kNN via Annoy (default: 100)
-- `--svm`: Use SVM instead of any kind of kNN for queries (slower and only works on symmetric models)
-- `--svm-c FLOAT`: SVM regularization parameter; higher values penalize mispredictions more (default: 1.0)
-- `--explain-split-count INTEGER`: Number of splits on a given window to use for explaining a query (default: 9)
-- `--explain-split-divide INTEGER`: Factor to divide the window size by to get each split length for explaining a query (default: 6)
-- `--num-explain-highlights INTEGER`: Number of split results to highlight for explaining a query (default: 2)
-- `--force`: Force process even if cached
-- `--silent`: Do not print progress information
-- `--no-confirm`: Do not show cost and ask for confirmation before processing with OpenAI
-- `--version`: Print version and exit
-- `--list-models`: List preset models and exit
-- `--show-semantra-dir`: Print the directory semantra will use to store processed files and exit
-- `--semantra-dir PATH`: Directory to store semantra files in
-- `--help`: Show this message and exit
+- `--model [openai|minilm|mpnet|sgpt|sgpt-1.3B]`: Modelo preestablecido para incrustar. Consulte [la guía de modelos] (docs/guide_models.md) para obtener más información (predeterminado: mpnet)
+- `--transformer-model TEXT`: Nombre del modelo de transformador Huggingface personalizado que se usará para incrustar (solo se debe especificar uno de `--model` y `--transformer-model`). Consulte [la guía de modelos](docs/guide_models.md) para obtener más información.
+- `--windows TEXT`: Ventanas incrustadas para extraer. Una lista separada por comas con el formato "size[\_offset=0][_rewind=0]. Una ventana con tamaño 128, desplazamiento 0 y rebobinado de 16 (128_0_16) incrustará el documento en fragmentos de 128 tokens que se superponen parcialmente por 16. Solo se usa la primera ventana para la búsqueda. Consulte el [documento de concepto de ventanas] (docs/concept_windows.md) para obtener más información (predeterminado: 128_0_16)
+- `--encoding`: Codificación a usar para leer archivos de texto [predeterminado: utf-8]
+- `--no-server`: No iniciar el servidor de UI (solo el proceso)
+- `--port INTEGER`: Puerto a usar para el servidor integrado (predeterminado: 8080)
+- `--host TEXT`: Host a usar para el servidor integrado (predeterminado: 0.0.0.0)
+- `--pool-size INTEGER`: Número máximo de tokens de incrustación para agrupar en las solicitudes
+- `--pool-count INTEGER`: Número máximo de incrustaciones para agrupar en las solicitudes
+- `--doc-token-pre TEXT`: Token para anteponer a cada documento en los modelos transformadores (predeterminado: Ninguno)
+- `--doc-token-post TEXT`: Token para agregar a cada documento en los modelos transformadores (predeterminado: Ninguno)
+- `--query-token-pre TEXT`: Token para anteponer a cada consulta en los modelos transformadores (predeterminado: Ninguno)
+- `--query-token-post TEXT`: Token para agregar a cada consulta en los modelos transformadores (predeterminado: Ninguno)
+- `--num-results INTEGER`: Número de resultados (vecinos) a recuperar por archivo para consultas (predeterminado: 10)
+- `--annoy`: Use kNN aproximados a través de Annoy para consultas (consultas más rápidas con un ligero costo de precisión); si es falso, use kNN exhaustivo exacto (predeterminado: True)
+- `--num-annoy-trees INTEGER`: Número de árboles a usar para kNN aproximados a través de Annoy (predeterminado: 100)
+- `--svm`: Use SVM en lugar de cualquier tipo de kNN para consultas (más lento y solo funciona en modelos simétricos)
+- `--svm-c FLOAT`: Parámetro de regularización de SVM; los valores más altos penalizan más las predicciones erróneas (predeterminado: 1.0)
+- `--explain-split-count INTEGER`: Número de divisiones en una ventana dada para explicar una consulta (predeterminado: 9)
+- `--explain-split-divide INTEGER`: Factor para dividir el tamaño de la ventana para obtener cada longitud dividida para explicar una consulta (predeterminado: 6)
+- `--num-explain-highlights INTEGER`: Número de resultados divididos para resaltar para explicar una consulta (predeterminado: 2)
+- `--force`: Forzar proceso incluso si está en caché
+- `--silent`: No imprimir información de progreso
+- `--no-confirm`: No mostrar el costo y pedir confirmación antes de procesar con OpenAI
+- `--version`: Imprime la versión y sale
+- `--list-models`: Lista los modelos preestablecidos y sale
+- `--show-semantra-dir`: Imprime el directorio que Semantra usará para almacenar archivos procesados y sale
+- `--semantra-dir PATH`: Directorio para almacenar archivos de Semantra
+- `--help`: Muestre este mensaje con las anteriores opciones y sale
 
-## Frequently asked questions
+## Preguntas frecuentes
 
-### Can it use ChatGPT?
+### ¿Puede usar ChatGPT?
 
-No, and this is by design.
+No, y esto es así desde su diseño.
 
-Semantra does not use any generative models like ChatGPT. It is built only to query text semantically without any layers on top to attempt explaining, summarizing, or synthesizing results. Generative language models occasionally produce outwardly plausible but ultimately incorrect information, placing the burden of verification on the user. Semantra treats primary source material as the only source of truth and endeavors to show that a human-in-the-loop search experience on top of simpler embedding models is more serviceable to users.
+Semantra no utiliza ningún modelo generativo como ChatGPT. Está diseñado solo para consultar texto semánticamente sin ninguna capa en la parte superior para intentar explicar, resumir o sintetizar los resultados. Los modelos de lenguaje generativo ocasionalmente producen información aparentemente plausible, pero en última instancia incorrecta, colocando la carga de la verificación en el usuario. Semantra trata el material de origen primario como la única fuente de verdad y se esfuerza por demostrar que una experiencia de búsqueda con interacción humana, además de modelos integrados más simples, es más útil para los usuarios.
 
-## Development
+## Desarrollo
 
-The Python app is in `src/semantra/semantra.py` and is managed as a standard Python command-line project with `pyproject.toml`.
+La aplicación de Python se encuentra en `src/semantra/semantra.py` y es administrada como un proyecto estándar de línea de comandos de Python con `pyproject.toml`.
 
-The local web app is written in [Svelte](https://svelte.dev/) and managed as a standard npm application.
+La aplicación web local está escrita en [Svelte](https://svelte.dev/) y es administrada como una aplicación npm estándar.
 
-To develop for the web app `cd` into `client` and then run `npm install`.
+Para desarrollar para la aplicación web use`cd` en `client` y luego ejecute `npm install`.
 
-To build the web app, run `npm run build`. To build the web app in watch mode and rebuild when there's changes, run `npm run build:watch`.
+Para compilar la aplicación web, ejecute `npm run build`. Para compilar la aplicación web en modo de observación y reconstruirla cuando haya cambios, ejecute `npm run build:watch`.
 
-## Contributions
+## Contribuciones
 
-The app is still in early stages, but contributions are welcome. Please feel free to submit an issue for any bugs or feature requests.
+La aplicación aún se encuentra en las primeras etapas, sin embargo las contribuciones son siempre bienvenidas. No dude en enviar o someter un _problema (issue)_ si experimenta cualquier error o si tiene una solicitud sobre una función que desea se agregue a Semantra.
