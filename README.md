@@ -10,12 +10,12 @@ Semantra is built for individuals seeking needles in haystacks — journalists s
 
 ## Resources
 
-- [Tutorial](docs/tutorial.md): a gentle introduction to getting started with Semantra — everything from installing the tool to hands-on examples of analyzing documents with it
+- [Tutorial](docs/tutorial.md): a gentle introduction to getting started with Semantra — everything from installing the tool to hands-on examples of analyzing documents with it
 - [Guides](docs/guides.md): practical guides on how to do more with Semantra
 - [Concepts](docs/concepts.md): Explainers on some concepts to better understand how Semantra works
 - [Using the web interface](docs/help.md): A reference on how to use the Semantra web app
 
-This page gives a high-level overview of Semantra and a reference of its features.
+This page gives a high-level overview of Semantra and a reference of its features. It's also available in other languages: [Semantra en español](docs/README_es.md).
 
 ## Installation
 
