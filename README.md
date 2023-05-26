@@ -15,7 +15,7 @@ Semantra is built for individuals seeking needles in haystacks — journalists s
 - [Concepts](docs/concepts.md): Explainers on some concepts to better understand how Semantra works
 - [Using the web interface](docs/help.md): A reference on how to use the Semantra web app
 
-This page gives a high-level overview of Semantra and a reference of its features. It's also available in other languages: [Semantra en español](docs/README_es.md).
+This page gives a high-level overview of Semantra and a reference of its features. It's also available in other languages: [Semantra en español](docs/README_es.md), [Semantra 中文说明](docs/README_zh-CN.md)
 
 ## Installation
 
