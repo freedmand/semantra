@@ -647,7 +647,7 @@ def main(
     @app.route("/")
     def base():
         return send_from_directory(
-            pkg_resources.resource_filename("semantra.semantra", "client_public"),
+            pkg_resources.resource_filename("semantra", "client_public"),
             "index.html",
         )
 
@@ -655,7 +655,7 @@ def main(
     @app.route("/<path:path>")
     def home(path):
         return send_from_directory(
-            pkg_resources.resource_filename("semantra.semantra", "client_public"),
+            pkg_resources.resource_filename("semantra", "client_public"),
             path,
         )
 
