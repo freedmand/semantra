@@ -4,12 +4,12 @@ from tqdm import tqdm
 import numpy as np
 from flask import Flask, request, jsonify, send_from_directory, send_file, make_response
 import click
-from .models import models, BaseModel, TransformerModel, as_numpy
+from models import models, BaseModel, TransformerModel, as_numpy
 import io
-from .pdf import get_pdf_content
+from pdf import get_pdf_content
 import math
 import hashlib
-from .util import (
+from util import (
     file_md5,
     get_tokens_filename,
     get_config_filename,
