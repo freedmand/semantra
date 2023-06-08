@@ -593,6 +593,7 @@ def main(
         cost_per_token = model_config["cost_per_token"]
         if pool_size is None:
             pool_size = model_config["pool_size"]
+        print('--------------POOL SIZE FROM CONFIG------------', pool_size)
         if pool_count is None:
             pool_count = model_config.get("pool_count", None)
         model: BaseModel = model_config["get_model"]()
