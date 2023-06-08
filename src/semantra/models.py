@@ -17,7 +17,7 @@ minilm_model_name = "sentence-transformers/all-MiniLM-L6-v2"
 mpnet_model_name = "sentence-transformers/all-mpnet-base-v2"
 sgpt_model_name = "Muennighoff/SGPT-125M-weightedmean-msmarco-specb-bitfit"
 sgpt_1_3B_model_name = "Muennighoff/SGPT-1.3B-weightedmean-msmarco-specb-bitfit"
-msmarco_distilbert_base_v4 = "sentence-transformers/msmarco-distilbert-base-v4"
+msmarco_distilbert_base_v4 = "sentence-transformers/msmarco-MiniLM-L6-cos-v5"
 
 
 def mean_pooling(model_output, attention_mask):
