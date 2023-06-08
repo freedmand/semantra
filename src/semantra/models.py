@@ -17,6 +17,7 @@ minilm_model_name = "sentence-transformers/all-MiniLM-L6-v2"
 mpnet_model_name = "sentence-transformers/all-mpnet-base-v2"
 sgpt_model_name = "Muennighoff/SGPT-125M-weightedmean-msmarco-specb-bitfit"
 sgpt_1_3B_model_name = "Muennighoff/SGPT-1.3B-weightedmean-msmarco-specb-bitfit"
+msmarco_distilbert_base_v4 = "sentence-transformers/msmarco-distilbert-base-v4"
 
 
 def mean_pooling(model_output, attention_mask):
@@ -323,6 +324,12 @@ models = {
             tokenizer_name="cl100k_base",
         ),
     },
+    "msmarco-v4": {
+        "cost_per_token": None,
+        "pool_size": None,
+        "get_model": lambda: TransformerModel(model_name=msmarco_distilbert_base_v4),
+    },
+
     "minilm": {
         "cost_per_token": None,
         "pool_size": 50000,
