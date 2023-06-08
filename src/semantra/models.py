@@ -326,7 +326,7 @@ models = {
     },
     "msmarco-v4": {
         "cost_per_token": None,
-        "pool_size": None,
+        "pool_size": 15000,
         "get_model": lambda: TransformerModel(model_name=msmarco_distilbert_base_v4),
     },
 
