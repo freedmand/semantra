@@ -17,6 +17,7 @@ minilm_model_name = "sentence-transformers/all-MiniLM-L6-v2"
 mpnet_model_name = "sentence-transformers/all-mpnet-base-v2"
 sgpt_model_name = "Muennighoff/SGPT-125M-weightedmean-msmarco-specb-bitfit"
 sgpt_1_3B_model_name = "Muennighoff/SGPT-1.3B-weightedmean-msmarco-specb-bitfit"
+sgpt_5_8B_model_name = "Muennighoff/SGPT-5.8B-weightedmean-msmarco-specb-bitfit"
 msmarco_MiniLM_L6_cos_v5 = "sentence-transformers/msmarco-MiniLM-L6-cos-v5"
 
 
@@ -364,4 +365,17 @@ models = {
             asymmetric=True,
         ),
     },
+    "sgpt-5.8B": {
+        "cost_per_token": None,
+        "pool_size": 1000,
+        "get_model": lambda: TransformerModel(
+            model_name=sgpt_5_8B_model_name,
+            query_token_pre="[",
+            query_token_post="]",
+            doc_token_pre="{",
+            doc_token_post="}",
+            asymmetric=True,
+        ),
+    },
+
 }
