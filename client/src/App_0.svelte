@@ -226,7 +226,7 @@
   <header
     class="flex flex-row border-b-4 border-black py-4 px-8 max-lg:px-4 items-start"
   >
-    <h1 class="text-3xl font-mono font-bold inline-flex pr-6 mt-1">Doc_Search</h1> <!--#Mohak -->
+    <h1 class="text-3xl font-mono font-bold inline-flex pr-6 mt-1">Semantra</h1>
     <SearchBar
       bind:this={searchBar}
       {preferences}
@@ -267,10 +267,10 @@
     </div>
   </article>
   <footer class="bg-black text-white py-1 px-4 text-sm">
-  <!--#Mohak  <a
+    <a
       class="underline mr-4"
       href="https://github.com/freedmand/semantra/blob/main/docs/help.md"
-      target="_blank">Help_1</a
+      target="_blank">Help</a
     >
     <a
       class="underline mr-4"
@@ -281,7 +281,7 @@
       class="underline"
       href="https://github.com/freedmand/semantra"
       target="_blank">Source code</a
-    > -->
+    >
   </footer>
 </main>
 
