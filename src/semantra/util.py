@@ -159,28 +159,28 @@ def get_offsets(doc_size, windows):
     return offsets, num_tokens
 
 
-def sort_results(results, reverse):
-    # Get average distance per result
-    avg_distances = []
-    for result in results:
-        avg_distances.append(np.mean([item["distance"] for item in result[1]]))
-
-    # Sort results by average distance
-    return {
-        "results": [x for _, x in sorted(zip(avg_distances, results), reverse=reverse)],
-        "sort": "desc" if reverse else "asc",
-    }
-
 # def sort_results(results, reverse):
 #     # Get average distance per result
-#     max_similarities = []
+#     avg_distances = []
 #     for result in results:
-#         sims = [item["distance"] for item in result[1]]
-#         sims_max = max(sims)
-#         max_similarities.append(sims_max)
+#         avg_distances.append(np.mean([item["distance"] for item in result[1]]))
 
 #     # Sort results by average distance
 #     return {
-#         "results": [x for _, x in sorted(zip(max_similarities, results), reverse=reverse)],
+#         "results": [x for _, x in sorted(zip(avg_distances, results), reverse=reverse)],
 #         "sort": "desc" if reverse else "asc",
 #     }
+
+def sort_results(results, reverse):
+    # Get average distance per result
+    max_similarities = []
+    for result in results:
+        sims = [item["distance"] for item in result[1]]
+        sims_max = max(sims)
+        max_similarities.append(sims_max)
+
+    # Sort results by average distance
+    return {
+        "results": [x for _, x in sorted(zip(max_similarities, results), reverse=reverse)],
+        "sort": "desc" if reverse else "asc",
+    }
