@@ -175,7 +175,9 @@ def sort_results(results, reverse):
     # Get average distance per result
     avg_distances = []
     for result in results:
-        avg_distances.append(np.min([item["distance"] for item in result[1]]))
+        sims = [item["distance"] for item in result[1]]
+        sims_max = max(sims)
+        avg_distances.append(sims_max)
 
     # Sort results by average distance
     return {
