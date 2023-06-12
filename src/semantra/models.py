@@ -19,6 +19,7 @@ sgpt_model_name = "Muennighoff/SGPT-125M-weightedmean-msmarco-specb-bitfit"
 sgpt_1_3B_model_name = "Muennighoff/SGPT-1.3B-weightedmean-msmarco-specb-bitfit"
 sgpt_5_8B_model_name = "Muennighoff/SGPT-5.8B-weightedmean-msmarco-specb-bitfit"
 msmarco_MiniLM_L6_cos_v5 = "sentence-transformers/msmarco-MiniLM-L6-cos-v5"
+bloom = "bigscience/bloom"
 
 
 def mean_pooling(model_output, attention_mask):
