@@ -178,7 +178,8 @@ def sort_results(results, reverse):
         sims = [item["distance"] for item in result[1]]
         sims_max = max(sims)
         max_similarities.append(sims_max)
-
+    print('-----------RETURNING MAXIMUM SCORE--------------')
+    print(max_similarities)
     # Sort results by average distance
     return {
         "results": [x for _, x in sorted(zip(max_similarities, results), reverse=reverse)],
