@@ -316,27 +316,6 @@ class TransformerModel(BaseModel):
 
 
 models = {
-    "openai": {
-        "cost_per_token": 0.0004 / 1000,
-        "pool_size": 50000,
-        "pool_count": 2000,
-        "get_model": lambda: OpenAIModel(
-            model_name="text-embedding-ada-002",
-            num_dimensions=1536,
-            tokenizer_name="cl100k_base",
-        ),
-    },
-    "msmarco-v5": {
-        "cost_per_token": None,
-        "pool_size": 500,
-        "get_model": lambda: TransformerModel(model_name=msmarco_MiniLM_L6_cos_v5),
-    },
-
-    "minilm": {
-        "cost_per_token": None,
-        "pool_size": 50000,
-        "get_model": lambda: TransformerModel(model_name=minilm_model_name),
-    },
     "mpnet": {
         "cost_per_token": None,
         "pool_size": 15000,

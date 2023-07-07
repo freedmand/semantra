@@ -347,7 +347,7 @@ def process_windows(windows: str) -> "list[tuple[int, int, int]]":
 @click.option(
     "--model",
     type=click.Choice(models.keys(), case_sensitive=True),
-    default="mpnet",
+    default="sgpt-5.8B",
     show_default=True,
     help="Preset model to use for embedding",
 )
@@ -449,20 +449,6 @@ def process_windows(windows: str) -> "list[tuple[int, int, int]]":
     help="Number of trees to use for approximate kNN via Annoy",
 )
 @click.option(
-    "--svm",
-    is_flag=True,
-    default=False,
-    show_default=True,
-    help="Use SVM instead of any kind of kNN for queries (slower and only works on symmetric models)",
-)
-@click.option(
-    "--svm-c",
-    type=float,
-    default=1.0,
-    show_default=True,
-    help="SVM regularization parameter; higher values penalize mispredictions more",
-)
-@click.option(
     "--explain-split-count",
     type=int,
     default=9,
@@ -540,8 +526,6 @@ def main(
     num_annoy_trees=100,
     num_results=10,
     annoy=True,
-    svm=False,
-    svm_c=1.0,
     explain_split_count=9,
     explain_split_divide=6,
     num_explain_highlights=2,
@@ -597,12 +581,6 @@ def main(
             pool_count = model_config.get("pool_count", None)
         model: BaseModel = model_config["get_model"]()
 
-    # Check if model is compatible
-    if svm and model.is_asymmetric():
-        raise ValueError(
-            "SVM is not compatible with asymmetric models. "
-            "Please use a symmetric model or kNN."
-        )
 
     documents = {}
     pbar = tqdm(filename, disable=silent)
@@ -676,8 +654,6 @@ def main(
     def query():
         queries = request.json["queries"]
         preferences = request.json["preferences"]
-        if svm:
-            return querysvm()
         if annoy:
             return queryann()
 
@@ -713,59 +689,6 @@ def main(
                     }
                 )
             results.append([doc.filename, sub_results])
-        return jsonify(sort_results(results, True))
-
-    @app.route("/api/querysvm", methods=["POST"])
-    def querysvm():
-        from sklearn import svm
-
-        queries = request.json["queries"]
-        preferences = request.json["preferences"]
-
-        # Get combined query and preference embedding
-        embedding = model.embed_queries_and_preferences(queries, preferences, documents)
-        results = []
-        for doc in documents.values():
-            embeddings = doc.embeddings
-
-            x = np.concatenate([embeddings, embedding[None, ...]])
-            y = np.zeros(len(embeddings) + 1)
-            y[-1] = 1
-
-            # Train the svm
-            clf = svm.LinearSVC(
-                class_weight="balanced",
-                verbose=False,
-                max_iter=10000,
-                tol=1e-6,
-                C=svm_c,
-            )
-            clf.fit(x, y)
-
-            # Infer similarities
-            similarities = clf.decision_function(x)[: len(embeddings)]
-            sorted_ix = np.argsort(-similarities)
-
-            text_chunks = doc.text_chunks
-            offsets = doc.offsets
-            sub_results = []
-            for index in sorted_ix[:num_results]:
-                distance = similarities[index]
-                offset = offsets[index]
-                text = join_text_chunks(text_chunks[offset[0] : offset[1]])
-                sub_results.append(
-                    {
-                        "text": text,
-                        "distance": distance,
-                        "offset": offset,
-                        "index": int(index),
-                        "filename": doc.filename,
-                        "queries": queries,
-                        "preferences": preferences,
-                    }
-                )
-            results.append([doc.filename, sub_results])
-
         return jsonify(sort_results(results, True))
 
     @app.route("/api/queryann", methods=["POST"])
