@@ -1,17 +1,14 @@
-import torch
+import os
 from abc import ABC, abstractmethod
-from transformers import AutoTokenizer, AutoModel
-import tiktoken
+
 import numpy as np
 import openai
+import tiktoken
+import torch
 from dotenv import load_dotenv
-import os
+from transformers import AutoModel, AutoTokenizer
 
 load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"))
-
-if "OPENAI_API_KEY" in os.environ:
-    openai.api_key = os.getenv("OPENAI_API_KEY")
-
 
 minilm_model_name = "sentence-transformers/all-MiniLM-L6-v2"
 mpnet_model_name = "sentence-transformers/all-mpnet-base-v2"
@@ -114,8 +111,11 @@ class OpenAIModel(BaseModel):
         # Check if OpenAI API key is set
         if "OPENAI_API_KEY" not in os.environ:
             raise Exception(
-                "OpenAI API key not set. Please set the OPENAI_API_KEY environment variable or create a `.env` file with the key in the same directory."
+                "OpenAI API key not set. Please set the OPENAI_API_KEY environment variable or create a `.env` file with the key in the current working directory or the Semantra directory, which is revealed by running `semantra --show-semantra-dir`."
             )
+        
+        openai.api_key = os.getenv("OPENAI_API_KEY")
+
         self.model_name = model_name
         self.num_dimensions = num_dimensions
         self.tokenizer = tiktoken.get_encoding(tokenizer_name)
