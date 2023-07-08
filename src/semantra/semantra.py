@@ -1,35 +1,39 @@
-import json
-import os
-from tqdm import tqdm
-import numpy as np
-from flask import Flask, request, jsonify, send_from_directory, send_file, make_response
-import click
-from .models import models, BaseModel, TransformerModel, as_numpy
-import io
-from .pdf import get_pdf_content
-import math
 import hashlib
+import io
+import json
+import math
+import os
+
+import click
+import numpy as np
+import pkg_resources
+from dotenv import load_dotenv
+from flask import Flask, jsonify, make_response, request, send_file, send_from_directory
+from tqdm import tqdm
+
+from .models import BaseModel, TransformerModel, as_numpy, models
+from .pdf import get_pdf_content
 from .util import (
+    HASH_LENGTH,
     file_md5,
-    get_tokens_filename,
+    get_annoy_filename,
     get_config_filename,
     get_embeddings_filename,
+    get_num_annoy_embeddings,
     get_num_embeddings,
     get_offsets,
-    read_embeddings_file,
-    write_embedding,
+    get_tokens_filename,
     join_text_chunks,
-    get_annoy_filename,
-    get_num_annoy_embeddings,
-    write_annoy_db,
     load_annoy_db,
+    read_embeddings_file,
     sort_results,
-    HASH_LENGTH,
+    write_annoy_db,
+    write_embedding,
 )
-import pkg_resources
 
 VERSION = pkg_resources.require("semantra")[0].version
 DEFAULT_ENCODING = "utf-8"
+DEFAULT_PORT = 8080
 
 package_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -380,7 +384,7 @@ def process_windows(windows: str) -> "list[tuple[int, int, int]]":
 @click.option(
     "--port",
     type=int,
-    default=8080,
+    default=DEFAULT_PORT,
     show_default=True,
     help="Port to use for embedding server",
 )
@@ -568,6 +572,10 @@ def main(
     if show_semantra_dir:
         print(semantra_dir)
         return
+    
+    # Load environment from Semantra dir
+    env_path = os.path.join(semantra_dir, ".env")
+    load_dotenv(env_path)
 
     if filename is None or len(filename) == 0:
         raise click.UsageError("Must provide a filename to process/query")
@@ -923,7 +931,17 @@ def main(
         return jsonify(documents[filename].text_chunks)
 
     if not no_server:
-        app.run(host=host, port=port)
+        try:
+            app.run(host=host, port=port)
+        except SystemExit as e:
+            import sys
+            sys.tracebacklimit=0
+            if port == DEFAULT_PORT:
+                raise Exception(
+                    f'Try running again and adding `--port <port>` to the command to specify a different port.'
+                ) from None
+            else:
+                raise Exception(f"Try specifying a different port with `--port <port>`.") from None
 
 
 if __name__ == "__main__":
