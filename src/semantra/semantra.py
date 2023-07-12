@@ -227,6 +227,7 @@ def process(
                     num_annoy_embeddings = get_num_annoy_embeddings(
                         annoy_filename, num_dimensions
                     )
+                print('-'*30, num_annoy_embeddings, '-'*30)
 
                 if (
                     not force
