@@ -11,11 +11,11 @@ Semantra 的目标用户是那些在需要在大量信息中寻找关键内容�
 ## Resources 资源
 
 - [教程](./tutorial.md)：一个入门级别的指南，涵盖了从安装 Semantra 到实践操作分析文档的全过程。
-- [指南](./guides.md)：一些实用的指南，帮助你更深入地使用Semantra。
-- [概念](./concepts.md)：一些关键概念，以帮助你更好地理解Semantra的工作原理。
+- [指南](./guides.md)：一些实用的指南，帮助你更深入地使用 Semantra。
+- [概念](./concepts.md)：一些关键概念，以帮助你更好地理解 Semantra 的工作原理。
 - [使用网页界面](./help.md)：Semantra 网页应用程序的使用说明。
 
-本页面为您提供了Semantra的高级概述和功能参考。我们还提供其他语言的版本：[西班牙语版](./README_es.md)，和[英文原版](README.md)。
+本页面为您提供了 Semantra 的高级概述和功能参考。我们还提供其他语言的版本：[西班牙语版](./README_es.md)，和[英文原版](README.md)。
 
 ## 安装
 
@@ -62,7 +62,7 @@ Semantra 在首次处理文档时会需要一些时间，每份文档只需处�
 
 当你首次运行 Semantra 时，可能需要几分钟时间和几百兆的硬盘空间来下载机器学习模型，该模型能在本地处理你输入的文档。虽然[使用的模型可以进行自定义](./guide_models.md)，但默认模型在速度、规模和效果上都达到了良好的平衡。
 
-如果你希望在不消耗自己的计算资源的情况下快速处理文档，并且不介意为使用外部服务付费或者与其分享数据，你可以使用[OpenAI的嵌入模型](./guide_openai.md)。
+如果你希望在不消耗自己的计算资源的情况下快速处理文档，并且不介意为使用外部服务付费或者与其分享数据，你可以使用[OpenAI 的嵌入模型](./guide_openai.md)。
 
 ## 网页应用程序快速浏览
 
@@ -113,9 +113,9 @@ semantra [OPTIONS] [FILENAME(S)]...
 - `--windows TEXT`: 要提取嵌入的窗口。格式为 "size[\_offset=0][\_rewind=0] 的逗号分隔列表。size 为 128、offset 为 0、rewind 为 16 的窗口（128_0_16）会把文本分为 128 个 token 长度的文本块，对每个文本块进行嵌入，并且让这些文本块之间重叠 16 个 token，并且只有第一个窗口会被用于搜索。有关更多信息，请参阅[窗口概念](./concept_windows.md)文档（默认：128_0_16）
 - `--encoding`: 用于读取文本文件的编码 [默认: utf-8]
 - `--encoding`：用于读取文本文件的编码（默认：utf-8）
-- `--no-server`：不启动UI服务器（只处理）
+- `--no-server`：不启动 UI 服务器（只处理）
 - `--port INTEGER`：嵌入服务器的端口（默认：8080）
-- `--host TEXT`：嵌入服务器的主机（默认：0.0.0.0）
+- `--host TEXT`：嵌入服务器的主机（默认：127.0.0.1）
 - `--pool-size INTEGER`：在请求中池化在一起的嵌入标记的最大数量
 - `--pool-count INTEGER`：在请求中池化在一起的嵌入的最大数量
 - `--doc-token-pre TEXT`：添加到 Transformer 模型中每个文档前面的标记（默认：None）
@@ -141,7 +141,7 @@ semantra [OPTIONS] [FILENAME(S)]...
 
 ## 常见问题
 
-### 能使用ChatGPT吗？
+### 能使用 ChatGPT 吗？
 
 不能，这是故意设计成这样的。
 
@@ -149,7 +149,7 @@ Semantra 并不依赖于任何像 ChatGPT 这样的生成模型。它仅被设�
 
 ## 开发
 
-Python应用程序位于`src/semantra/semantra.py`，并作为标准 Python 命令行项目通过 `pyproject.toml` 进行管理。
+Python 应用程序位于`src/semantra/semantra.py`，并作为标准 Python 命令行项目通过 `pyproject.toml` 进行管理。
 
 本地网络应用程序使用 [Svelte](https://svelte.dev/) 编写，并以标准的 npm 应用程序进行管理。
 

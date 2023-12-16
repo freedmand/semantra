@@ -391,9 +391,9 @@ def process_windows(windows: str) -> "list[tuple[int, int, int]]":
 @click.option(
     "--host",
     type=str,
-    default="0.0.0.0",
+    default="127.0.0.1",
     show_default=True,
-    help="Host to use for embedding server",
+    help="Host to use for embedding server. Set to 0.0.0.0 to make the server available externally.",
 )
 @click.option(
     "--pool-size",
@@ -531,7 +531,7 @@ def main(
     windows="128_0_16",
     no_server=False,
     port=8080,
-    host="0.0.0.0",
+    host="127.0.0.1",
     pool_size=None,
     pool_count=None,
     doc_token_pre=None,

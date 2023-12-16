@@ -120,7 +120,7 @@ semantra [OPTIONS] [FILENAME(S)]...
 - `--encoding`: Encoding to use for reading text files [default: utf-8]
 - `--no-server`: Do not start the UI server (only process)
 - `--port INTEGER`: Port to use for embedding server (default: 8080)
-- `--host TEXT`: Host to use for embedding server (default: 0.0.0.0)
+- `--host TEXT`: Host to use for embedding server (default: 127.0.0.1)
 - `--pool-size INTEGER`: Max number of embedding tokens to pool together in requests
 - `--pool-count INTEGER`: Max number of embeddings to pool together in requests
 - `--doc-token-pre TEXT`: Token to prepend to each document in transformer models (default: None)

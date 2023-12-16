@@ -116,7 +116,7 @@ semantra [OPTIONS] [FILENAME(S)]...
 - `--encoding`: Codificación a usar para leer archivos de texto [predeterminado: utf-8]
 - `--no-server`: No iniciar el servidor de UI (solo el proceso)
 - `--port INTEGER`: Puerto a usar para el servidor integrado (predeterminado: 8080)
-- `--host TEXT`: Host a usar para el servidor integrado (predeterminado: 0.0.0.0)
+- `--host TEXT`: Host a usar para el servidor integrado (predeterminado: 127.0.0.1)
 - `--pool-size INTEGER`: Número máximo de tokens de incrustación para agrupar en las solicitudes
 - `--pool-count INTEGER`: Número máximo de incrustaciones para agrupar en las solicitudes
 - `--doc-token-pre TEXT`: Token para anteponer a cada documento en los modelos transformadores (predeterminado: Ninguno)
