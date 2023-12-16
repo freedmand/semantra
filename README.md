@@ -36,6 +36,14 @@ pipx install semantra
 
 This will install Semantra on your path. You should be able to run `semantra` in the terminal and see output.
 
+Note: if the above steps don't work or you'd like a more granular installation, you can install Semantra in a virtual environment (though note it will only be accessible while the virtual environment is activated):
+
+```sh
+python3 -m venv venv
+source venv/bin/activate
+pip install semantra
+```
+
 ## Usage
 
 Semantra operates on collections of documents — text or PDF files — stored on your local computer.
