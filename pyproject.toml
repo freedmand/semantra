@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "semantra"
-version = "0.1.8"
+version = "0.1.9"
 description = "A semantic search CLI tool"
 authors = [{name = "Dylan Freedman", email = "freedmand@gmail.com"}]
 readme = "README.md"
@@ -24,7 +24,8 @@ dependencies = [
   "tiktoken>=0.3.3",
   "torch>=2.0.0",
   "tqdm>=4.65.0",
-  "transformers>=4.27.4"
+  "transformers>=4.27.4",
+  "setuptools"
 ]
 
 [project.urls]

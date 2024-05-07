@@ -25,6 +25,13 @@ The easiest way to install Semantra is via `pipx`. If you do not have `pipx` ins
 
 ```sh
 python3 -m pip install --user pipx
+```
+
+Or, if you have [Homebrew](https://brew.sh/) installed, you can run `brew install pipx`.
+
+Once `pipx` is installed, run:
+
+```sh
 python3 -m pipx ensurepath
 ```
 
