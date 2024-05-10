@@ -61,7 +61,7 @@ The interface is divided into four main sections:
 - **search bar**: the top of the website where a long search bar runs across. This is where the main searching happens
 - **results pane**: the left sidebar. This is where search results show up
 - **tab bar**: shows all the files and highlights which one is loaded in the content window
-- **content window**: displays a browseable document
+- **content window**: displays a browsable document
 
 ![The Semantra web interface](img/interface_breakdown.png)
 

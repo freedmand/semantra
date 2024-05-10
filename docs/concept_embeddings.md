@@ -16,6 +16,6 @@ In the diagram above, the embeddings for `queen`, `king`, `man`, and `woman` are
 
 With only six dimensions, we can still represent many concepts. The last bar in `king` and `queen` looks similar so might encode concepts like _royalty_. The fourth and fifth bars in `man` and `woman` are similar and might represent _human_. The first bars in `king` and `man` are similar along with the first bars in `queen` and `woman` and so could encode the concept of _gender_.
 
-Modern embedding models give us hundreds of dimensions, which means we can express complex and nuanced relationships betweeen concepts. This kind of analogizing with embedding math over high-dimensional conceputal encodings opens up powerful implications for semantic search. Semantra allows performing basic arithmetic in the search bar and also adding/subtracting search results to finely shape your query and find specific results.
+Modern embedding models give us hundreds of dimensions, which means we can express complex and nuanced relationships between concepts. This kind of analogizing with embedding math over high-dimensional conceputal encodings opens up powerful implications for semantic search. Semantra allows performing basic arithmetic in the search bar and also adding/subtracting search results to finely shape your query and find specific results.
 
 See [lesson 2 of the tutorial](lesson_2_advanced_searching.md) for a walkthrough of some of these advanced features.
