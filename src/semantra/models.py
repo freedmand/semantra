@@ -2,7 +2,7 @@ import os
 from abc import ABC, abstractmethod
 
 import numpy as np
-import openai
+from openai import OpenAI
 import tiktoken
 import torch
 from dotenv import load_dotenv
@@ -104,7 +104,7 @@ class BaseModel(ABC):
 class OpenAIModel(BaseModel):
     def __init__(
         self,
-        model_name="text-embedding-ada-002",
+        model_name="text-embedding-3-small",
         num_dimensions=1536,
         tokenizer_name="cl100k_base",
     ):
@@ -113,16 +113,15 @@ class OpenAIModel(BaseModel):
             raise Exception(
                 "OpenAI API key not set. Please set the OPENAI_API_KEY environment variable or create a `.env` file with the key in the current working directory or the Semantra directory, which is revealed by running `semantra --show-semantra-dir`."
             )
-        
-        openai.api_key = os.getenv("OPENAI_API_KEY")
 
         self.model_name = model_name
         self.num_dimensions = num_dimensions
         self.tokenizer = tiktoken.get_encoding(tokenizer_name)
+        self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     def get_config(self):
         return {
-            "model_type": "openai",
+            "model_type": "openai" if self.model_name == "text-embedding-3-small" else "openai-large",
             "model_name": self.model_name,
             "tokenizer_name": self.tokenizer.name,
         }
@@ -141,8 +140,8 @@ class OpenAIModel(BaseModel):
 
     def embed(self, tokens, offsets, _is_query=False) -> "list[list[float]]":
         texts = [tokens[i:j] for i, j in offsets]
-        response = openai.Embedding.create(model=self.model_name, input=texts)
-        return np.array([data["embedding"] for data in response["data"]])
+        response = self.client.embeddings.create(model=self.model_name, input=texts)
+        return np.array([data.embedding for data in response.data])
 
 
 def zero_if_none(x):
@@ -314,12 +313,22 @@ class TransformerModel(BaseModel):
 
 models = {
     "openai": {
-        "cost_per_token": 0.0004 / 1000,
+        "cost_per_token": 0.00002 / 1000,
         "pool_size": 50000,
         "pool_count": 2000,
         "get_model": lambda: OpenAIModel(
-            model_name="text-embedding-ada-002",
+            model_name="text-embedding-3-small",
             num_dimensions=1536,
+            tokenizer_name="cl100k_base",
+        ),
+    },
+    "openai-large": {
+        "cost_per_token": 0.00013 / 1000,
+        "pool_size": 50000,
+        "pool_count": 2000,
+        "get_model": lambda: OpenAIModel(
+            model_name="text-embedding-3-large",
+            num_dimensions=3072,
             tokenizer_name="cl100k_base",
         ),
     },
