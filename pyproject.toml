@@ -27,7 +27,7 @@ dependencies = [
 description = "A semantic search CLI tool"
 name = "semantra"
 readme = "README.md"
-version = "0.1.11"
+version = "0.1.12"
 
 [project.urls]
 "Bug Tracker" = "https://github.com/freedmand/semantra/issues"
@@ -38,7 +38,8 @@ version = "0.1.11"
 semantra = "semantra.semantra:main"
 
 [tool.setuptools.packages.find]
+include = ["semantra*"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-semantra = ["client_public"]
+semantra = ["client_public/**/*"]
