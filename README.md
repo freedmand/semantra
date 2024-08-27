@@ -38,7 +38,7 @@ python3 -m pipx ensurepath
 Open a new terminal window for the new path settings `pipx` sets to go into effect. Then run:
 
 ```sh
-pipx install semantra
+python3 -m pipx install semantra
 ```
 
 This will install Semantra on your path. You should be able to run `semantra` in the terminal and see output.
