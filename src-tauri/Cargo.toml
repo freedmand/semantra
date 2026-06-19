@@ -14,24 +14,134 @@ edition = "2021"
 name = "semantra_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Explicit binary target so the executable (and thus the macOS dock label in
+# `tauri dev`) is title-cased "Semantra" rather than the lowercase crate name.
+# The package/lib names stay lowercase per Rust convention.
+[[bin]]
+name = "Semantra"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[dev-dependencies]
+# Async test harness for the VectorStore integration tests (LanceDB is async).
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Integration tests open a temp LanceDB connection directly to construct stores.
+lancedb = "0.30"
+
 [dependencies]
-tauri = { version = "2", features = [] }
+# `protocol-asset` enables the `asset:`/`convertFileSrc` protocol so PDF.js can
+# stream copied PDFs from the app-data dir (scoped in tauri.conf.json).
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
+# Native "open file" dialog so the frontend can hand the backend a real
+# filesystem path (an HTML <input type=file> in the webview yields no path).
+# PDF parsing then reads straight from that path via pdfium.
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Lenient text decoding for indexed `.txt` files. Many real-world text files
+# aren't UTF-8 (Windows-1252, ISO-8859-*, Shift-JIS, GBK, …). `chardetng` is
+# Firefox's charset detector (by the encoding_rs author) — it sniffs the bytes
+# and picks the encoding, which `encoding_rs` then decodes. encoding_rs is already
+# in the tree transitively; declared directly so we can name it.
+chardetng = "0.1"
+encoding_rs = "0.8"
+
+# PDFium binding for PDF text extraction. `default-features = false` drops the
+# `image_latest` feature (and the heavy `image` crate) — we only pull text, never
+# render. We do NOT enable `static`, so the crate binds *dynamically* via
+# `libloading` to a bundled `libpdfium` at runtime (fetched per-target by
+# build.rs, shipped as a Tauri resource). `thread_safe` wraps the non-reentrant
+# C library in a mutex so it is safe to call from blocking tasks.
+pdfium-render = { version = "0.9", default-features = false, features = ["pdfium_latest", "thread_safe"] }
 
 # mdbr-leaf-ir embedding pipeline (BERT -> mean-pool -> Dense 384->768 -> L2).
 # Path dependency so this rarely-changing, candle-heavy crate compiles once and
 # is cached separately from the frequently-rebuilt app code.
 leaf-ir-candle-test = { path = "../../mdbr-leaf-ir-candle" }
 
+# On-disk vector store for indexed chunks. LanceDB 0.30 has NO default features,
+# so this pulls in only the local embedded store + IVF/HNSW indexes — none of the
+# remote/cloud (reqwest, aws-lc, openssl) or embedding-function (candle, openai)
+# features that complicate cross-compilation. `arrow-*` is pinned to the exact
+# version LanceDB re-exports so we build RecordBatches it accepts without a dup.
+lancedb = "0.30"
+arrow-array = "58"
+arrow-schema = "58"
+tempfile = "3"
+futures = "0.3"
+
+# Content-addressed file dedup: SHA-512 of the raw bytes keys the `files` table,
+# so identical files are copied/embedded once regardless of how many projects
+# reference them. `uuid` mints project ids for the (future) multi-project UI.
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+
+# Async primitives for the indexing pipeline: a `Mutex` guarding the (async)
+# vector store in Tauri state, and an `mpsc` channel feeding embedded batches
+# from the blocking inference thread to the async inserter. Already in the tree
+# transitively via LanceDB; declared directly so we can name the types.
+tokio = { version = "1", features = ["sync"] }
+
 # Optimize ALL dependencies (candle, gemm, tokenizers) even in dev/`tauri dev`
 # builds. Without this, candle's matmul kernels run unoptimized and embedding is
 # ~13x slower (9s vs ~0.3s). App code itself stays unoptimized for fast
 # incremental rebuilds and debuggability — only deps pay the one-time opt cost.
 [profile.dev.package."*"]
+opt-level = 3
+
+# Aggressive size-optimized release. The shipped binary is dominated by the
+# LanceDB/DataFusion/Arrow/sqlparser stack (a full columnar SQL engine pulled in
+# for the vector store) — NOT the ML runtime — so squeezing dependency code is
+# the lever. Combined effect of these four: ~183MB -> see below.
+#
+#   opt-level = "z"     optimize for size over speed (smallest codegen)
+#   lto = "fat"         whole-program inlining + cross-crate dead-code elimination
+#   codegen-units = 1   no parallel-codegen duplication; maximizes LTO's reach
+#   strip = true        drop the ~33MB symbol table (__LINKEDIT)
+#   panic = "abort"     no unwind tables/landing pads. NOTE: a panic now aborts
+#                       the process instead of unwinding; drop this flag if you
+#                       see hard crashes where an error was previously caught.
+#                       (Cargo still builds test/bench harnesses with unwind, so
+#                       `cargo test --release` is unaffected.)
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Exempt the embedding hot path from size optimization: "z" guts matmul
+# throughput (see the dev-profile note above — ~13x), and these crates are a
+# tiny slice of the binary, so keeping them at opt-level 3 costs little size and
+# preserves embedding speed.
+[profile.release.package.candle-core]
+opt-level = 3
+[profile.release.package.candle-nn]
+opt-level = 3
+[profile.release.package.candle-transformers]
+opt-level = 3
+[profile.release.package.candle-metal-kernels]
+opt-level = 3
+[profile.release.package.gemm]
+opt-level = 3
+[profile.release.package.gemm-common]
+opt-level = 3
+[profile.release.package.gemm-f16]
+opt-level = 3
+[profile.release.package.gemm-f32]
+opt-level = 3
+[profile.release.package.gemm-f64]
+opt-level = 3
+[profile.release.package.gemm-c32]
+opt-level = 3
+[profile.release.package.gemm-c64]
+opt-level = 3
+[profile.release.package.half]
+opt-level = 3
+[profile.release.package.matrixmultiply]
 opt-level = 3
 

@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Design tokens for the in-project interface (the /project tree). The
+   top-level demo page keeps its own scoped styles; these variables are used by
+   the ported semantra-web components and the PDF.js viewer chrome.
+
+   Light theme, mirroring the original semantra-web palette (stark black
+   borders, slate-100 surfaces) blended with skim's elevated-surface tokens for
+   the PDF viewer. The app is light-only and does not follow the OS dark-mode
+   preference.
+--------------------------------------------------------------------------- */
+:root {
+  color-scheme: light;
+  --color-bg: #f1f5f9; /* slate-100 */
+  --color-bg-elevated: #ffffff;
+  --color-bg-hover: #e2e8f0; /* slate-200 */
+  --color-border: #0f0f0f;
+  --color-border-soft: #cbd5e1; /* slate-300 */
+  --color-border-hover: #475569;
+  --color-text: #0f0f0f;
+  --color-text-muted: #475569;
+  --color-text-dim: #94a3b8;
+  --color-accent: #396cd8;
+  --color-accent-muted: rgb(57 108 216 / 12%);
+  --color-error: #c0392b;
+
+  /* Result + passage highlight (matches semantra-web). */
+  --color-score-badge: rgb(255 222 0 / 39%);
+  --color-explain-highlight: rgb(154 134 0 / 18%);
+  /* Translucent marker yellow: composited normally over the page (canvas text
+     or the text reader), so glyphs stay legible through the tint. Kept
+     deliberately light — `mix-blend-mode` is unreliable over a <canvas> backdrop
+     in WKWebView, so we rely on alpha rather than a blend mode. */
+  --color-page-highlight: rgb(255 224 0 / 42%);
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --shadow-sm: 0 1px 3px rgb(0 0 0 / 18%);
+}
+
+html,
+body {
+  height: 100%;
+}

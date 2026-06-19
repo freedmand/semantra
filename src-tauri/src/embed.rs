@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use leaf_ir_candle_test::{embed_sentences, ModelCtx, QUERY_PREFIX};
+use leaf_ir_candle_test::QUERY_PREFIX;
 
 /// Default number of chunks handed to the model per inference call. Batching
 /// does not change results (pooling/normalization are per-row, padding is
@@ -54,20 +54,30 @@ pub enum EmbedProgress {
     },
 }
 
-/// Embed every chunk in `chunks` in batches of `batch_size`, **discarding** the
-/// resulting vectors (they are not stored or returned), invoking `on_progress`
-/// before the run, after each batch, and once at the end.
+/// Embed every chunk in `chunks` in batches of `batch_size`, **keeping** each
+/// batch's vectors: `on_batch(start_index, chunk_texts, vectors)` fires once per
+/// batch with the rows so a caller can insert them into a vector store as they
+/// are produced (pipelining embedding with persistence). `on_progress` fires
+/// before the run, after each batch, and once at the end, so the UI can size and
+/// advance a progress bar.
+///
+/// `embed_batch` does the actual inference for one batch of (already
+/// prefix-applied) inputs and returns one vector per input. Taking it as a
+/// callback — rather than a borrowed `ModelCtx` — lets the caller control lock
+/// scope: the background worker re-locks the shared model **per batch** so a
+/// concurrent search can grab it between batches instead of waiting for the
+/// whole file.
 ///
 /// When `is_query` is true each chunk is prefixed with the asymmetric-retrieval
-/// query prefix; documents are embedded raw — matching the `embed` command.
-///
-/// This is synchronous and CPU-bound; callers that must not block an event loop
-/// (e.g. the Tauri command) should run it on a blocking thread.
-pub fn embed_chunks_streaming(
-    ctx: &ModelCtx,
+/// query prefix; documents are embedded raw. `on_batch` borrows the (original,
+/// unprefixed) texts and owns the vectors. Synchronous and CPU-bound; run it on
+/// a blocking thread when an event loop must stay responsive.
+pub fn embed_chunks_with_vectors(
+    mut embed_batch: impl FnMut(&[String]) -> Result<Vec<Vec<f32>>, String>,
     chunks: Vec<String>,
     is_query: bool,
     batch_size: usize,
+    mut on_batch: impl FnMut(usize, &[String], Vec<Vec<f32>>) -> Result<(), String>,
     mut on_progress: impl FnMut(EmbedProgress),
 ) -> Result<(), String> {
     let total_chunks = chunks.len();
@@ -96,11 +106,13 @@ pub fn embed_chunks_streaming(
         };
 
         let batch_start = Instant::now();
-        // Compute and immediately drop: we only care that embedding ran, not
-        // the vectors. This keeps memory flat regardless of file size.
-        let _ = embed_sentences(ctx, &inputs).map_err(|e| e.to_string())?;
+        let rows = embed_batch(&inputs)?;
         let batch_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
         batch_times_ms.push(batch_ms);
+
+        // Hand the freshly-embedded rows to the caller. We pass the *original*
+        // (unprefixed) chunk texts so they can be stored verbatim.
+        on_batch(batch_index * batch_size, batch, rows)?;
 
         on_progress(EmbedProgress::Batch {
             batch_index,

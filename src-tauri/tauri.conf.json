@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "semantra",
+  "productName": "Semantra",
   "version": "0.1.0",
   "identifier": "com.semantra.app",
   "build": {
@@ -12,23 +12,25 @@
   "app": {
     "windows": [
       {
-        "title": "semantra",
-        "width": 800,
-        "height": 600
+        "title": "Semantra",
+        "width": 1200,
+        "height": 800
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/**", "$APPLOCALDATA/**"]
+      }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
     "resources": [
-      "models/config.json",
-      "models/tokenizer.json",
-      "models/model.safetensors",
-      "models/2_Dense/model.safetensors"
+      "models/mdbr-leaf-ir/**/*",
+      "libpdfium/*"
     ],
     "icon": [
       "icons/32x32.png",

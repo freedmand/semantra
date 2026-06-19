@@ -1,7 +1,10 @@
-// Oracle check for the model files bundled under src-tauri/models, loaded the
-// same way the app resolves them in dev (relative to CARGO_MANIFEST_DIR). This
-// guards against a corrupted copy and against the move breaking the pipeline:
-// if the published model-card similarity drifts from 0.6857, something is wrong.
+// Oracle check for the bundled model files, loaded the same way the app resolves
+// them in dev (relative to CARGO_MANIFEST_DIR). This guards against a corrupted
+// copy and against the move breaking the pipeline: if the published model-card
+// similarity drifts from 0.6857, something is wrong.
+//
+// The oracle value is specific to mdbr-leaf-ir, so this test names that model
+// directly rather than following the app's `MODEL_NAME` switch.
 //
 // Run with: cargo test --release
 
@@ -11,7 +14,7 @@ use leaf_ir_candle_test::{embed_sentences, setup_model, QUERY_PREFIX};
 
 #[test]
 fn bundled_model_reproduces_oracle() {
-    let model_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models");
+    let model_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/mdbr-leaf-ir");
     let ctx = setup_model(&model_dir).expect("load bundled model files");
 
     let query = format!("{QUERY_PREFIX}What is machine learning?");

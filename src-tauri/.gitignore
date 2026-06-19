@@ -6,6 +6,10 @@
 # will have schema files for capabilities auto-completion
 /gen/schemas
 
-# Bundled mdbr-leaf-ir model weights (~90MB). Fetched out-of-band via the
-# crate's fetch.py and copied into models/; not tracked in git.
+# Bundled embedding-model weights (~90MB each), one subdir per model under
+# models/<name>/. Fetched out-of-band via ./fetch-model.sh; not tracked in git.
 /models
+
+# Prebuilt PDFium dynamic library, fetched per-target by build.rs and bundled as
+# a Tauri resource. Platform-specific binary; not tracked in git.
+/libpdfium
