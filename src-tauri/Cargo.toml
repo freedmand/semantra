@@ -154,3 +154,13 @@ opt-level = 3
 [profile.release.package.matrixmultiply]
 opt-level = 3
 
+# Vendored fix for lance-linalg 7.0.0: its build.rs compiles the AVX-512
+# dist_table.c kernel with `-march=native`, which fails when cross-compiling the
+# x86_64 slice on an arm64 macOS runner (our universal build) — "unknown target
+# CPU 'apple-m2'" — leaving `sum_4bit_dist_table_32bytes_batch_avx512` undefined
+# at link time. The vendored copy uses an explicit `-march=skylake-avx512` so the
+# kernel compiles for the x86_64 target on any host. The kernel is runtime-gated
+# (SIMD_SUPPORT detection), so it's only executed on AVX-512-capable CPUs.
+[patch.crates-io]
+lance-linalg = { path = "vendor/lance-linalg" }
+
