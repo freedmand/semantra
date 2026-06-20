@@ -62,7 +62,7 @@
   async function remove(p: ProjectListItem) {
     const detail =
       p.docCount > 0
-        ? ` and its ${p.docCount} document${p.docCount === 1 ? "" : "s"}`
+        ? ` and its ${p.docCount.toLocaleString()} document${p.docCount === 1 ? "" : "s"}`
         : "";
     if (!confirm(`Delete project “${p.name}”${detail}? This cannot be undone.`)) {
       return;
@@ -80,7 +80,11 @@
   <!-- Wordmark only. Mirrors the workspace header: identical wordmark logo
        and a matching border-b-4. The create action lives in the list below. -->
   <header class="px-4 py-3 border-b-4" style="border-color: var(--color-border);">
-    <button onclick={() => goto("/")} title="Home">
+    <button
+      class="cursor-pointer hover:opacity-70 transition-opacity"
+      onclick={() => goto("/")}
+      title="Home"
+    >
       <SemantraLogo class="h-[1.875rem]" />
     </button>
   </header>
@@ -96,6 +100,7 @@
           placeholder="New project name…"
           bind:value={sidebar.newName}
           autofocus
+          onblur={() => (sidebar.creatingOpen = false)}
           onkeydown={(e) => {
             if (e.key === "Escape") sidebar.creatingOpen = false;
           }}
@@ -105,6 +110,7 @@
           class="px-3 py-1.5 rounded-md text-sm font-medium text-white disabled:opacity-50"
           style="background: var(--color-accent);"
           disabled={sidebar.creating || sidebar.newName.trim() === ""}
+          onmousedown={(e) => e.preventDefault()}
         >
           {sidebar.creating ? "Creating…" : "Create project"}
         </button>

@@ -1,0 +1,4 @@
+/target
+# The demo/verify binaries load weights from ./models (fetched out-of-band).
+# Vendored into semantra; the app itself loads models from src-tauri/models.
+/models

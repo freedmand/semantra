@@ -29,7 +29,7 @@
     "active": true,
     "targets": "all",
     "resources": [
-      "models/**/*",
+      "models/mdbr-leaf-mt/**/*",
       "libpdfium/*"
     ],
     "icon": [

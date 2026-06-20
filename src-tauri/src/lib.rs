@@ -76,6 +76,12 @@ struct AppPaths {
 // Vectors buffered to this many rows before a single LanceDB append.
 const INSERT_BATCH: usize = 1024;
 
+// New chunks the worker lets accumulate before refreshing the search indexes
+// mid-run (see `index_worker`). Index rebuilds are otherwise deferred to when
+// the queue drains; this bounds how stale keyword search can get during a very
+// large import without paying the rebuild cost on every file.
+const MAINTENANCE_ROW_THRESHOLD: usize = 50_000;
+
 /// Words per chunk for background indexing, and the rewind/overlap shared
 /// between consecutive windows. Both are baked into [`pipeline_version`], so
 /// changing either auto-invalidates on-disk vectors and triggers re-indexing.
@@ -84,10 +90,14 @@ const DEFAULT_CHUNK_OVERLAP: usize = 10;
 
 /// Which embedding model to load. The model files live under
 /// `models/<MODEL_NAME>/` (bundled as a resource and in the dev tree). This is
-/// the single switch for the active model: flipping it loads the new weights,
+/// the switch for the active model: flipping it loads the new weights and
 /// changes [`pipeline_version`] (so the DB detects the change and re-indexes on
-/// next startup), and — because `tauri.conf.json` bundles all of `models/**` —
-/// needs no other edit. The store sizes itself to the model's embedding dim.
+/// next startup). The store sizes itself to the model's embedding dim.
+///
+/// Note: `tauri.conf.json` only bundles the *active* model dir
+/// (`models/mdbr-leaf-mt/**`) to keep the app bundle small — the other model
+/// dirs stay in the dev tree but are not shipped. So switching to a different
+/// model also requires updating the `resources` glob in `tauri.conf.json`.
 ///
 /// Known good values: `"mdbr-leaf-ir"` (768-d retrieval), `"mdbr-leaf-mt"`
 /// (1024-d multi-task).
@@ -232,15 +242,10 @@ async fn run_index_pipeline(
     if !buf.is_empty() {
         store.lock().await.insert(&buf).await?;
     }
-    {
-        let mut guard = store.lock().await;
-        guard.maybe_build_ann().await?;
-        guard.ensure_fts_index().await?;
-        // Reclaim disk: each per-file (re)index appends fragments and rebuilds
-        // indexes additively, leaving stale versions behind. Compact + prune
-        // collapses them. Safe here because we hold the store guard exclusively.
-        guard.compact().await?;
-    }
+    // Index (re)builds and compaction are intentionally NOT done here: each one
+    // rebuilds over the whole table, so running them per file makes a multi-file
+    // import O(files²). The worker refreshes them off this hot path — once when
+    // the queue drains and occasionally mid-run (see `index_worker`).
 
     producer
         .await
@@ -566,6 +571,28 @@ fn progress_sink(
     })
 }
 
+/// Refresh the store's search indexes + compaction when at least `threshold`
+/// new chunks have been inserted since the last pass. Holds the store guard
+/// exclusively (required by `compact`'s version-prune). Best-effort: logs and
+/// returns on error so the indexing worker keeps running.
+async fn maybe_maintain_store(app: &AppHandle, threshold: usize) {
+    let store = app.state::<SharedStore>();
+    let pending = match store.lock().await.rows_since_maintenance().await {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[semantra] indexing worker: rows_since_maintenance failed: {e}");
+            return;
+        }
+    };
+    if pending < threshold {
+        return;
+    }
+    let result = store.lock().await.maintain().await;
+    if let Err(e) = result {
+        eprintln!("[semantra] indexing worker: index maintenance failed: {e}");
+    }
+}
+
 /// Background worker loop: drain the durable job queue one file at a time,
 /// sleeping on the notifier when it is empty. Runs for the life of the app.
 async fn index_worker(app: AppHandle) {
@@ -585,10 +612,20 @@ async fn index_worker(app: AppHandle) {
                         .map(|c| c.0)
                         .unwrap_or(0);
                     emit_index(&app, &job, "error", 0, 0, remaining, &e);
+                } else {
+                    // Mid-run refresh once enough new chunks have piled up, so
+                    // keyword search doesn't stay stale through a huge import.
+                    // Best-effort: on failure the indexes just stay stale until
+                    // the queue drains — don't fail the file or stop the worker.
+                    maybe_maintain_store(&app, MAINTENANCE_ROW_THRESHOLD).await;
                 }
             }
-            // Queue drained (or a transient read error) — wait to be woken.
-            Ok(None) => (*app.state::<SharedNotify>()).clone().notified().await,
+            // Queue drained — refresh indexes once for everything added since the
+            // last pass, then wait to be woken.
+            Ok(None) => {
+                maybe_maintain_store(&app, 1).await;
+                (*app.state::<SharedNotify>()).clone().notified().await
+            }
             Err(e) => {
                 eprintln!("[semantra] indexing worker: read queue failed: {e}");
                 (*app.state::<SharedNotify>()).clone().notified().await;

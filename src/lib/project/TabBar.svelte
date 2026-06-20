@@ -14,7 +14,7 @@
     <div class="inline-flex flex-nowrap flex-row items-center h-full pl-2">
       {#each search.docs as doc, i (doc.sha512)}
         <button
-          class="text-xs rounded-sm py-1 px-2 mr-2 border whitespace-nowrap"
+          class="text-xs rounded-sm h-7 inline-flex items-center px-2 mr-2 border whitespace-nowrap"
           class:active-tab={i === search.activeIndex}
           style="border-color: {i === search.activeIndex ? 'var(--color-border)' : 'transparent'}; background: {i ===
           search.activeIndex

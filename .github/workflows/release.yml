@@ -1,0 +1,179 @@
+name: Release
+
+# Builds signed/notarized macOS (Apple Silicon + Intel), Linux, and Windows
+# installers via tauri-action.
+#
+#   • Push a tag `vX.Y.Z`  -> builds all platforms and uploads them to a DRAFT
+#                             GitHub Release named after the tag.
+#   • Run manually (Actions -> Release -> Run workflow) -> builds all platforms
+#                             and uploads the installers as workflow artifacts,
+#                             without creating a release. Use this as a dry run.
+#
+# The embedding weights (~45 MB, gitignored) are fetched + quantized ONCE in the
+# `prepare-model` job and shared to every build job as an artifact, so we don't
+# hit Hugging Face / run Python four times.
+#
+# macOS signing is REQUIRED: the mac jobs read Developer ID + notarization
+# credentials from repository secrets (see APPLE_* below). Missing secrets cause
+# the mac build to fail at the signing/notarization step — by design.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Allow the workflow to create the release and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fetch + F16-quantize the active model once; share to build jobs as an
+  # artifact. The weights are platform-independent, so this avoids re-running
+  # the Python quantization on every (including Windows) runner.
+  # ---------------------------------------------------------------------------
+  prepare-model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # numpy + safetensors power src-tauri/quantize-model.py (F32 -> F16).
+      - name: Install quantization deps
+        run: pip install numpy safetensors
+
+      # Fetches from Hugging Face into src-tauri/models/mdbr-leaf-mt/ and
+      # quantizes the BERT weights in place. Must match MODEL_NAME in lib.rs.
+      - name: Fetch + quantize mdbr-leaf-mt
+        run: bash src-tauri/fetch-model.sh mdbr-leaf-mt
+
+      - name: Upload model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-mdbr-leaf-mt
+          path: src-tauri/models/mdbr-leaf-mt
+          retention-days: 1
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Build the app for each platform. macOS is built per-arch on its native
+  # runner (no cross-compile of the Accelerate/Metal candle path).
+  # ---------------------------------------------------------------------------
+  build:
+    needs: prepare-model
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            os: macos-14
+            rust_target: aarch64-apple-darwin
+            args: "--target aarch64-apple-darwin"
+          - name: macOS (Intel)
+            os: macos-13
+            rust_target: x86_64-apple-darwin
+            args: "--target x86_64-apple-darwin"
+          - name: Linux (x86_64)
+            os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            args: ""
+          - name: Windows (x86_64)
+            os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            args: ""
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri's Linux runtime/build deps (webkit2gtk 4.1, GTK, appindicator,
+      # rsvg) plus patchelf for AppImage. No-op on macOS/Windows.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            file \
+            libssl-dev \
+            libsoup-3.0-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      # Cache the (large) Rust dependency build — datafusion/lance/candle dominate
+      # compile time. Scoped to the src-tauri crate.
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Restore the shared, pre-quantized weights so the bundle resource
+      # (models/mdbr-leaf-mt/**) is present at build time.
+      - name: Download model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: model-mdbr-leaf-mt
+          path: src-tauri/models/mdbr-leaf-mt
+
+      - name: Build and bundle
+        uses: tauri-apps/tauri-action@v0
+        env:
+          # --- macOS code signing (Developer ID) ---
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # --- macOS notarization ---
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          # Create a draft release only when triggered by a version tag.
+          # On manual (workflow_dispatch) runs tagName is empty -> no release;
+          # installers are uploaded as workflow artifacts in the next step.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/v') && format('Semantra {0}', github.ref_name) || '' }}
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      # Dry-run convenience: when not building a release, surface the installers
+      # as downloadable workflow artifacts so they can be inspected/tested. The
+      # two globs cover both bundle layouts: `target/<triple>/release/bundle`
+      # when `--target` is passed (macOS) and `target/release/bundle` otherwise
+      # (Linux/Windows). Only one exists per job; the other is silently empty.
+      - name: Upload installers (manual runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.rust_target }}
+          path: |
+            src-tauri/target/${{ matrix.rust_target }}/release/bundle/**/*
+            src-tauri/target/release/bundle/**/*
+          retention-days: 7
+          if-no-files-found: warn

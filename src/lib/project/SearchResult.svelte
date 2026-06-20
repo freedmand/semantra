@@ -5,7 +5,7 @@
   // the navigate/set-preference actions come from the central appState.
   import type { Explanation } from "$lib/embedding/search";
   import type { ProjectHit } from "./projectClient";
-  import { appState, setPreference, jumpToResult } from "$lib/state.svelte";
+  import { appState, setPreference, jumpToResult, scorePercent } from "$lib/state.svelte";
   import SearchResultText from "./SearchResultText.svelte";
 
   let {
@@ -41,12 +41,12 @@
       <div class="font-bold text-base my-2">
         {hit.basename}
         <span class="px-1 rounded-sm text-xs" style="background: var(--color-score-badge);"
-          >{hit.score.toFixed(2)}</span
+          >{scorePercent(hit.score)}</span
         >
       </div>
     {:else}
       <span class="text-xs px-1 rounded-sm" style="background: var(--color-score-badge);"
-        >{hit.score.toFixed(2)}</span
+        >{scorePercent(hit.score)}</span
       >
     {/if}
     <button

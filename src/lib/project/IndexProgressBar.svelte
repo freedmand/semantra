@@ -16,7 +16,9 @@
   const label = $derived(
     active
       ? `Indexing ${active.basename}` +
-        (active.total > 0 ? ` — ${active.done}/${active.total} chunks` : "…")
+        (active.total > 0
+          ? ` — ${active.done.toLocaleString()}/${active.total.toLocaleString()} chunks`
+          : "…")
       : "Indexing…",
   );
 </script>
@@ -34,6 +36,6 @@
     ></div>
   </div>
   {#if pending > 0}
-    <span class="shrink-0">{pending} queued</span>
+    <span class="shrink-0">{pending.toLocaleString()} queued</span>
   {/if}
 </div>

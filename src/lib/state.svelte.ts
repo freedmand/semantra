@@ -80,6 +80,8 @@ interface SearchView {
   status: ProjectStatus;
   query: string;
   results: ProjectHit[];
+  /** Current result cap; grows by SEARCH_LIMIT each "load more". */
+  limit: number;
   explanations: Record<number, Explanation | null>;
   /** Quoted keyword literals from the active query, for extra in-result highlighting. */
   literals: string[];
@@ -138,6 +140,7 @@ function emptySearch(): SearchView {
     status: { jobs: [], active: null },
     query: "",
     results: [],
+    limit: SEARCH_LIMIT,
     explanations: {},
     literals: [],
     preferences: {},
@@ -264,19 +267,32 @@ class AppState {
 
   /** Active (non-zero) preference marks, for the search bar chips. */
   prefList = $derived(Object.values(this.search.preferences).filter((p) => p.weight !== 0));
+
+  /** Whether the last search likely has more results to fetch (hit the cap). */
+  searchHasMore = $derived(
+    !this.search.unsearched && this.search.results.length >= this.search.limit,
+  );
 }
 
 export const appState = new AppState();
 
 // === Pure label helpers =====================================================
 
+/** A similarity score (0–1) as a rounded percent, e.g. "56%". */
+export function scorePercent(score: number): string {
+  return `${Math.round(score * 100)}%`;
+}
+
 /** Short status line for a manage-view file row. */
 export function manageRowLabel(row: ManageRow): string {
   switch (row.state) {
     case "indexed":
-      return "Indexed";
+      // No label once indexed — the word-count stats line signals it's ready to search.
+      return "";
     case "indexing":
-      return row.total && row.total > 0 ? `Indexing… ${row.done}/${row.total}` : "Indexing…";
+      return row.total && row.total > 0
+        ? `Indexing… ${(row.done ?? 0).toLocaleString()}/${row.total.toLocaleString()}`
+        : "Indexing…";
     case "queued":
       return "Queued";
     case "error":
@@ -286,7 +302,7 @@ export function manageRowLabel(row: ManageRow): string {
 
 /** Human-readable size, e.g. "1.2 MB". */
 function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
+  if (n < 1024) return `${n.toLocaleString()} B`;
   const units = ["KB", "MB", "GB", "TB"];
   let v = n / 1024;
   let i = 0;
@@ -294,7 +310,7 @@ function formatBytes(n: number): string {
     v /= 1024;
     i++;
   }
-  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+  return `${v < 10 ? v.toFixed(1) : Math.round(v).toLocaleString()} ${units[i]}`;
 }
 
 /**
@@ -315,9 +331,11 @@ export function manageRowStats(row: ManageRow): string | null {
 
 /** Short status line for a sidebar project row. */
 export function projectStatusLabel(p: ProjectListItem): string {
-  const parts: string[] = [`${p.docCount} ${p.docCount === 1 ? "document" : "documents"}`];
-  if (p.pendingCount > 0) parts.push(`${p.pendingCount} indexing`);
-  if (p.errorCount > 0) parts.push(`${p.errorCount} failed`);
+  const parts: string[] = [
+    `${p.docCount.toLocaleString()} ${p.docCount === 1 ? "document" : "documents"}`,
+  ];
+  if (p.pendingCount > 0) parts.push(`${p.pendingCount.toLocaleString()} indexing`);
+  if (p.errorCount > 0) parts.push(`${p.errorCount.toLocaleString()} failed`);
   return parts.join(" · ");
 }
 
@@ -429,27 +447,26 @@ async function refreshSearchIndexing(): Promise<void> {
   appState.search.status = status;
 }
 
-/** Run the in-project search for `q`, then asynchronously attach explanations. */
-export async function runSearch(q: string): Promise<void> {
+/** Run the in-project search at the current query/limit, then attach explanations. */
+async function executeSearch(): Promise<void> {
   const s = appState.search;
-  s.query = q;
   const prefs: Preference[] = Object.values(s.preferences)
     .filter((p) => p.weight !== 0)
     .map((p) => ({ text: p.hit.text, weight: p.weight }));
-  if (q.trim() === "" && prefs.length === 0) {
+  if (s.query.trim() === "" && prefs.length === 0) {
     s.results = [];
     s.unsearched = true;
     return;
   }
   const myRun = ++s.runId;
-  const parsed = parseQuery(q);
+  const parsed = parseQuery(s.query);
   s.literals = parsed.literals;
-  s.results = await searchProject(s.projectId, q, prefs, SEARCH_LIMIT);
+  s.results = await searchProject(s.projectId, s.query, prefs, s.limit);
   s.unsearched = false;
   s.explanations = {};
 
   // Best-effort highlighting: explain against the semantic part of the query.
-  const semantic = parsed.semantic.map((t) => t.text).join(" ").trim() || q;
+  const semantic = parsed.semantic.map((t) => t.text).join(" ").trim() || s.query;
   const current = s.results;
   explainMatches(semantic, current.map((r) => r.text))
     .then((exps) => {
@@ -459,6 +476,19 @@ export async function runSearch(q: string): Promise<void> {
       s.explanations = map;
     })
     .catch((e) => console.warn("explain failed", e));
+}
+
+/** Run a fresh search for `q` (resets the result cap). */
+export async function runSearch(q: string): Promise<void> {
+  appState.search.query = q;
+  appState.search.limit = SEARCH_LIMIT;
+  await executeSearch();
+}
+
+/** Fetch the next page of results for the current query (grows the cap). */
+export async function loadMoreResults(): Promise<void> {
+  appState.search.limit += SEARCH_LIMIT;
+  await executeSearch();
 }
 
 /** Set (or clear, when `weight === 0`) the relevance-feedback mark for a hit. */

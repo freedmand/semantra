@@ -64,10 +64,13 @@ csv = "1"
 # C library in a mutex so it is safe to call from blocking tasks.
 pdfium-render = { version = "0.9", default-features = false, features = ["pdfium_latest", "thread_safe"] }
 
-# mdbr-leaf-ir embedding pipeline (BERT -> mean-pool -> Dense 384->768 -> L2).
-# Path dependency so this rarely-changing, candle-heavy crate compiles once and
-# is cached separately from the frequently-rebuilt app code.
-leaf-ir-candle-test = { path = "../../mdbr-leaf-ir-candle" }
+# mdbr-leaf embedding pipeline (BERT -> mean-pool -> Dense -> L2). Despite the
+# `-ir` in its name it serves whichever leaf model MODEL_NAME selects (mt today).
+# Vendored into the repo at ./leaf-ir-candle so CI (and any fresh checkout) can
+# build without an out-of-tree path. Path dependency so this rarely-changing,
+# candle-heavy crate compiles once and is cached separately from the
+# frequently-rebuilt app code.
+leaf-ir-candle-test = { path = "../leaf-ir-candle" }
 
 # On-disk vector store for indexed chunks. LanceDB 0.30 has NO default features,
 # so this pulls in only the local embedded store + IVF/HNSW indexes — none of the

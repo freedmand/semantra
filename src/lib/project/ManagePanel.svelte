@@ -42,7 +42,9 @@
   async function removeProject() {
     const count = manage.docs.length;
     const detail =
-      count > 0 ? ` and its ${count} document${count === 1 ? "" : "s"}` : "";
+      count > 0
+        ? ` and its ${count.toLocaleString()} document${count === 1 ? "" : "s"}`
+        : "";
     if (!confirm(`Delete project “${appState.manageProjectName}”${detail}? This cannot be undone.`)) {
       return;
     }
@@ -126,6 +128,7 @@
     {#if !manage.loading && appState.manageRows.length > 0}
       <ul class="flex flex-col gap-1.5">
         {#each appState.manageRows as row (row.sha512)}
+          {@const detail = [manageRowLabel(row), manageRowStats(row)].filter(Boolean).join(" · ")}
           <li
             class="rounded-md border px-4 py-3 flex items-center gap-4"
             style="border-color: var(--color-border-soft); background: var(--color-bg-elevated);"
@@ -138,10 +141,7 @@
                   ? 'var(--color-error)'
                   : 'var(--color-text-muted)'};"
               >
-                {manageRowLabel(row)}
-                {#if manageRowStats(row)}
-                  <span> · {manageRowStats(row)}</span>
-                {/if}
+                {detail}
               </div>
             </div>
             <button

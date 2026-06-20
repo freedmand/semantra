@@ -676,38 +676,17 @@ export function markKeywords(
   return merged;
 }
 
-/** Background alpha at full saturation. Matches the shared page-highlight ink
- *  (`--color-page-highlight` in app.css, the txt reader's highlight, and the PDF
- *  reader's `HL_ALPHA`) so a hit reads the same everywhere. */
-const MAX_ALPHA = 0.42;
 /**
- * Floor alpha for any non-zero contribution. A linear ramp leaves faint spans
- * almost invisible; this guarantees even the weakest real contribution reads.
- */
-const MIN_ALPHA = 0.08;
-/**
- * Gamma applied to the magnitude before scaling. Values < 1 push low/mid
- * magnitudes up the ramp, so the highlighting reads clearly without being a
- * slight, hard-to-see fade.
- */
-const ALPHA_GAMMA = 0.3;
-
-/**
- * Map a normalized positive weight in [0, 1] to a yellow CSS background, alpha
- * scaling with magnitude. Returns `"transparent"` for zero/negative weight —
- * only positive contributions are highlighted.
+ * Background tint for a positive explain contribution in the results list. A
+ * flat olive wash (`--color-explain-highlight` in app.css); returns
+ * `"transparent"` for zero/negative weight, so only positive contributions are
+ * highlighted.
  *
- * The yellow (`rgb(255 224 0)`) and peak alpha match the shared page-highlight
- * ink (`--color-page-highlight` in app.css — the txt reader's highlight — and
- * the PDF reader's `HL_COLOR`/`HL_ALPHA`) so a hit looks the same in the results
- * list, the txt reader, and the PDF. The magnitude→alpha mapping is
- * intentionally non-linear: a gamma curve lifts weaker contributions and a floor
- * keeps them visible, ramping color in aggressively so highlights aren't
- * barely-there.
+ * This explain tint is deliberately distinct from the *viewer* highlight ink —
+ * the PDF reader's `HL_COLOR` and the txt/CSV readers' `--color-page-highlight`,
+ * both yellow — which is unchanged. The explain tint marks per-word attribution
+ * in the results list; the viewers mark the located passage.
  */
 export function colorFor(weight: number): string {
-  if (weight <= 0) return "transparent";
-  const mag = Math.pow(Math.min(weight, 1), ALPHA_GAMMA);
-  const alpha = (MIN_ALPHA + mag * (MAX_ALPHA - MIN_ALPHA)).toFixed(3);
-  return `rgb(255 224 0 / ${alpha})`;
+  return weight > 0 ? "rgb(154 134 0 / 18%)" : "transparent";
 }

@@ -13,12 +13,15 @@
     return Math.min(2, Math.max(0.1, v));
   }
 
-  // Track the (query, preferences) state at the last search to show staleness.
+  // Track the (query, preferences, indexed-doc-count) state at the last search to
+  // show staleness — including doc count so the bar re-yellows when more files
+  // finish indexing after a search (their results aren't reflected yet).
   let lastKey = $state("");
   const searchKey = $derived(
     JSON.stringify({
       value: search.query,
       prefs: appState.prefList.map((p) => [p.hit.index, p.weight]),
+      docs: search.docs.length,
     }),
   );
   const outdated = $derived(searchKey !== lastKey);

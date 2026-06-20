@@ -1,0 +1,45 @@
+[package]
+name = "leaf-ir-candle-test"
+version = "0.1.0"
+edition = "2021"
+
+# Shared pipeline lives in src/lib.rs; both binaries use it.
+[lib]
+name = "leaf_ir_candle_test"
+path = "src/lib.rs"
+
+# Main demo binary
+[[bin]]
+name = "leaf-ir-candle-test"
+path = "src/main.rs"
+
+# Reference-free verification binary: cargo run --release --bin verify
+[[bin]]
+name = "verify"
+path = "src/verify.rs"
+
+[dependencies]
+candle-core = "0.8"
+candle-nn = "0.8"
+candle-transformers = "0.8"
+tokenizers = "0.20"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Files are loaded from ./models (downloaded out-of-band via the notebook).
+# No hf-hub / ureq: the test has zero network dependency.
+
+# Apple platforms (macOS + iOS) ship the Accelerate framework — route candle's
+# f32 BLAS/GEMM through it for a meaningful CPU speedup. We also compile in the
+# `metal` GPU backend here; whether it's actually used is decided at RUNTIME by
+# `select_device` (see src/lib.rs), which tries the Apple GPU and falls back to
+# CPU. Both features coexist: accelerate powers the CPU path, metal the GPU path.
+# Gated by target so non-Apple builds (Linux/Windows) never try to link these.
+#
+# NOTE: Metal is not always faster — GPU dispatch overhead can dominate for small
+# batches. The env var LEAF_IR_DEVICE=cpu|metal forces a device for A/B timing.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+candle-core = { version = "0.8", features = ["accelerate", "metal"] }
+candle-nn = { version = "0.8", features = ["accelerate", "metal"] }
+candle-transformers = { version = "0.8", features = ["accelerate", "metal"] }

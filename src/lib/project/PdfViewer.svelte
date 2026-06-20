@@ -204,6 +204,9 @@
       eventBus,
       linkService,
       textLayerMode: 2,
+      // Keep our canvas-painted highlight working at every zoom: the detail
+      // canvas would otherwise overlay the visible region past the pixel cap.
+      enableDetailCanvas: false,
     });
     linkService.setViewer(pdfViewer);
 
@@ -229,6 +232,8 @@
       }
     });
 
+    viewerContainer.addEventListener("wheel", onWheel, { passive: false });
+
     await loadDocument();
   });
 
@@ -236,6 +241,7 @@
   // so there's no in-place reload to handle here.
 
   onDestroy(() => {
+    viewerContainer?.removeEventListener("wheel", onWheel);
     pdfViewer?.cleanup?.();
     pdfDoc?.destroy?.();
   });
@@ -243,11 +249,39 @@
   function goToPage(p: number) {
     if (pdfViewer && p >= 1 && p <= pdf.totalPages) pdfViewer.currentPageNumber = p;
   }
-  function zoom(factor: number) {
-    if (pdfViewer) pdfViewer.currentScale *= factor;
-  }
   function fitWidth() {
     if (pdfViewer) pdfViewer.currentScaleValue = "page-width";
+  }
+
+  // Cap zoom at 250%. Past the canvas-pixel limit PDF.js renders a separate
+  // detail canvas over the visible region, and our highlight (painted on the
+  // underlying page canvas) ends up beneath it — so we disable the detail canvas
+  // (see PDFViewer options) and keep zoom under that regime.
+  const MIN_SCALE = 0.1;
+  const MAX_SCALE = 2.5;
+  // Drawing delay (ms) for wheel/pinch zoom: PDF.js applies an immediate CSS
+  // transform and postpones the crisp re-render, giving the smooth "canvas"
+  // zoom feel of its own viewer (mirrors its defaultZoomDelay).
+  const ZOOM_DELAY = 400;
+
+  /** Multiply the scale by `factor` (clamped to [MIN, MAX]), anchored at the
+   *  given client point — delegating to PDF.js's own origin-aware smooth zoom.
+   *  Toolbar buttons pass no point (anchors on the current page) and no delay. */
+  function zoomBy(factor: number, clientX?: number, clientY?: number, drawingDelay = -1) {
+    if (!pdfViewer || !pdfDoc) return;
+    const cur = pdfViewer.currentScale;
+    const target = Math.round(Math.min(MAX_SCALE, Math.max(MIN_SCALE, cur * factor)) * 100) / 100;
+    if (target === cur) return;
+    const origin = clientX != null && clientY != null ? [clientX, clientY] : undefined;
+    pdfViewer.updateScale({ scaleFactor: target / cur, origin, drawingDelay });
+  }
+
+  // Trackpad pinch arrives as a wheel event with ctrlKey set; register
+  // non-passively (Svelte's `onwheel` is passive) so preventDefault sticks.
+  function onWheel(e: WheelEvent) {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    zoomBy(Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY, ZOOM_DELAY);
   }
 </script>
 
@@ -262,20 +296,22 @@
         value={pdf.currentPage}
         onchange={(e) => goToPage(parseInt((e.target as HTMLInputElement).value) || 1)}
       />
-      <span class="dim">/ {pdf.totalPages}</span>
+      <span class="dim">/ {pdf.totalPages.toLocaleString()}</span>
       <button onclick={() => goToPage(pdf.currentPage + 1)} disabled={pdf.currentPage >= pdf.totalPages}
         >›</button
       >
     </div>
     <div class="grp">
-      <button onclick={() => zoom(0.8)} title="Zoom out">−</button>
+      <button onclick={() => zoomBy(0.8)} title="Zoom out">−</button>
       <span class="dim">{Math.round(pdf.scale * 100)}%</span>
-      <button onclick={() => zoom(1.25)} title="Zoom in">+</button>
+      <button onclick={() => zoomBy(1.25)} title="Zoom in">+</button>
       <button onclick={fitWidth} title="Fit width" aria-label="Fit width">
-        <svg viewBox="0 0 83 83" width="15" height="15" fill="none" stroke="currentColor" aria-hidden="true">
-          <path d="M40.4026 42.3164C44.2692 46.5388 49.8275 49.1866 56.0042 49.1866C67.6847 49.1866 77.1536 39.7177 77.1536 28.0372C77.1536 16.3566 67.6847 6.8877 56.0042 6.8877C44.3236 6.8877 34.8547 16.3566 34.8547 28.0372C34.8547 33.541 36.9571 38.5538 40.4026 42.3164ZM40.4026 42.3164L21.6421 61.0768" stroke-width="6.33594" stroke-linecap="round" />
-          <path d="M37.7332 58.4917L55.8199 76.5783M42.9757 76.5783H55.8199V63.7342" stroke-width="5.69523" />
-          <path d="M26.3554 45.647L8.26876 27.5603M21.1129 27.5603H8.26876V40.4045" stroke-width="5.69523" />
+        <svg viewBox="0 0 21 14" width="21" height="14" fill="none" aria-hidden="true">
+          <path d="M0 7.47124L4.29108 10.3859V4.55654L0 7.47124Z" fill="currentColor" />
+          <path d="M21.0087 7.47124L16.7176 10.3859V4.55654L21.0087 7.47124Z" fill="currentColor" />
+          <path d="M2.14554 7.47124H7.63699" stroke="currentColor" stroke-width="1.67984" />
+          <path d="M18.8632 7.47124H13.3717" stroke="currentColor" stroke-width="1.67984" />
+          <rect x="7.3443" y="0.839921" width="6.3201" height="12.2051" stroke="currentColor" stroke-width="1.67984" />
         </svg>
       </button>
     </div>
@@ -316,26 +352,34 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    box-sizing: border-box;
     min-width: 26px;
     height: 26px;
-    border: 1px solid var(--color-border-soft);
+    padding: 0;
+    line-height: 1;
+    font-size: 0.95rem;
+    border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    background: var(--color-bg-elevated);
+    background: white;
     color: var(--color-text);
     cursor: pointer;
+  }
+  .toolbar button:hover:not(:disabled) {
+    background: var(--color-bg-hover);
   }
   .toolbar button:disabled {
     opacity: 0.4;
     cursor: default;
   }
   .toolbar input {
+    box-sizing: border-box;
     width: 44px;
     height: 26px;
     text-align: center;
     font-size: 0.85rem;
-    border: 1px solid var(--color-border-soft);
+    border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
-    background: var(--color-bg);
+    background: white;
     color: var(--color-text);
   }
   .dim {

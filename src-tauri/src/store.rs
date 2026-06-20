@@ -112,6 +112,9 @@ pub struct VectorStore {
     ann_built: bool,
     rows_at_last_index: usize,
     fts_built: bool,
+    /// Row count at the last `maintain()` (index rebuild + compaction). Drives
+    /// the worker's "rows added since the indexes were last refreshed" trigger.
+    rows_at_last_maintenance: usize,
 }
 
 impl VectorStore {
@@ -137,14 +140,51 @@ impl VectorStore {
             (None, 0)
         };
 
+        // Detect which indexes actually exist (rather than assuming they do
+        // whenever the table exists): the FTS/ANN builds are deferred off the
+        // per-file path now, so a table can exist with no indexes yet — e.g. an
+        // import that inserted rows but was killed before the post-drain rebuild.
+        //
+        // Seed `rows_at_last_maintenance` to the number of rows the FTS index
+        // *actually covers* (0 if there's no index). That way reopening a fully
+        // indexed store reports 0 rows pending (no spurious rebuild), while any
+        // unindexed tail left by a crash reports as pending and the worker
+        // rebuilds it on its first drain — keyword search self-heals on restart.
+        let (ann_built, fts_built, rows, indexed_rows) = match &table {
+            Some(t) => {
+                let indices = t
+                    .list_indices()
+                    .await
+                    .map_err(|e| format!("list indices: {e}"))?;
+                let on_col =
+                    |col: &str| indices.iter().find(|i| i.columns.iter().any(|c| c == col));
+                let rows = t
+                    .count_rows(None)
+                    .await
+                    .map_err(|e| format!("count rows: {e}"))?;
+                let indexed_rows = match on_col("text") {
+                    Some(ix) => t
+                        .index_stats(&ix.name)
+                        .await
+                        .map_err(|e| format!("fts index stats: {e}"))?
+                        .map(|s| s.num_indexed_rows)
+                        .unwrap_or(0),
+                    None => 0,
+                };
+                (on_col("vector").is_some(), on_col("text").is_some(), rows, indexed_rows)
+            }
+            None => (false, false, 0, 0),
+        };
+
         Ok(Self {
             conn,
             table,
             dim,
             next_id,
-            ann_built: false,
-            rows_at_last_index: 0,
-            fts_built: names.iter().any(|n| n == TABLE_NAME),
+            ann_built,
+            rows_at_last_index: rows,
+            fts_built,
+            rows_at_last_maintenance: indexed_rows,
         })
     }
 
@@ -360,6 +400,14 @@ impl VectorStore {
         let Some(table) = &self.table else {
             return Ok(Vec::new());
         };
+        // `full_text_search` is only valid once the FTS index exists, and it has
+        // no scan fallback (unlike vector search). The index build is deferred to
+        // `maintain()`, so before the first refresh there's simply nothing to
+        // match against — yield no candidates rather than erroring. Keyword
+        // results become available after the next maintenance pass.
+        if !self.fts_built {
+            return Ok(Vec::new());
+        }
         if sha_filter.is_empty() {
             return Ok(Vec::new());
         }
@@ -436,6 +484,41 @@ impl VectorStore {
             })
             .await
             .map_err(|e| format!("prune old versions: {e}"))?;
+        Ok(())
+    }
+
+    /// Current committed row count (0 before the table exists).
+    async fn current_rows(&self) -> Result<usize, String> {
+        match &self.table {
+            Some(table) => table
+                .count_rows(None)
+                .await
+                .map_err(|e| format!("count rows: {e}")),
+            None => Ok(0),
+        }
+    }
+
+    /// Rows inserted since the last [`maintain`](Self::maintain). Lets the
+    /// indexing worker decide whether enough new chunks have accumulated to
+    /// justify a mid-run index refresh.
+    pub async fn rows_since_maintenance(&self) -> Result<usize, String> {
+        Ok(self
+            .current_rows()
+            .await?
+            .saturating_sub(self.rows_at_last_maintenance))
+    }
+
+    /// Refresh the search indexes and reclaim disk in one exclusive pass: build
+    /// the ANN index if it has grown enough, (re)build the n-gram FTS index, and
+    /// compact + prune. Deliberately kept *off* the per-file indexing path — each
+    /// of these rebuilds over the whole table, so running them per file makes a
+    /// multi-file import O(files²). The worker calls this once when the queue
+    /// drains and occasionally mid-run (see `MAINTENANCE_ROW_THRESHOLD`).
+    pub async fn maintain(&mut self) -> Result<(), String> {
+        self.maybe_build_ann().await?;
+        self.ensure_fts_index().await?;
+        self.compact().await?;
+        self.rows_at_last_maintenance = self.current_rows().await?;
         Ok(())
     }
 
@@ -692,6 +775,70 @@ mod tests {
         // Compaction + prune should succeed and leave the data intact.
         store.compact().await.unwrap();
         assert_eq!(store.count_for(&["a".into(), "b".into()]).await.unwrap(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn substring_search_yields_nothing_until_index_built() {
+        let (mut store, _t) = temp_store(2).await;
+        store
+            .insert(&[row("f", "The Greenhouse effect", vec![1.0, 0.0])])
+            .await
+            .unwrap();
+
+        // No FTS index yet (the build is deferred to `maintain`): keyword search
+        // returns nothing rather than erroring on the missing index.
+        assert_eq!(store.rows_since_maintenance().await.unwrap(), 1);
+        assert!(store
+            .substring_search(&["green".into()], 10, &["f".into()])
+            .await
+            .unwrap()
+            .is_empty());
+
+        // After a maintenance pass the FTS index exists and the same query hits.
+        store.maintain().await.unwrap();
+        assert_eq!(store.rows_since_maintenance().await.unwrap(), 0);
+        let hits = store
+            .substring_search(&["green".into()], 10, &["f".into()])
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "The Greenhouse effect");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopen_reports_unindexed_rows_as_pending_maintenance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let uri = tmp.path().to_str().unwrap();
+        let open = || async {
+            let conn = lancedb::connect(uri).execute().await.unwrap();
+            VectorStore::open(conn, 2).await.unwrap()
+        };
+
+        // Insert rows but never maintain — simulates an import killed before the
+        // post-drain index rebuild.
+        {
+            let mut store = open().await;
+            store
+                .insert(&[row("f", "The Greenhouse effect", vec![1.0, 0.0])])
+                .await
+                .unwrap();
+        }
+
+        // Reopen: the FTS index doesn't exist, so all rows read as pending and a
+        // maintenance pass is owed (the worker runs one on its first drain).
+        let mut store = open().await;
+        assert_eq!(store.rows_since_maintenance().await.unwrap(), 1);
+        store.maintain().await.unwrap();
+
+        // Reopen again after a clean maintenance: nothing pending, no rebuild owed.
+        drop(store);
+        let store = open().await;
+        assert_eq!(store.rows_since_maintenance().await.unwrap(), 0);
+        assert!(!store
+            .substring_search(&["green".into()], 10, &["f".into()])
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

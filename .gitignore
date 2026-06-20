@@ -8,3 +8,8 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Locally-built installers / bundles (produced by `pnpm tauri build`; CI builds
+# the distributable artifacts). Don't commit large binaries to the repo.
+*.dmg
+*.app
