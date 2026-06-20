@@ -73,8 +73,13 @@ jobs:
             os: macos-14
             rust_target: aarch64-apple-darwin
             args: "--target aarch64-apple-darwin"
+          # Cross-compiled on the Apple Silicon runner (macos-14): GitHub is
+          # retiring Intel macos-13 runners and Intel jobs no longer get
+          # scheduled. The arm runner builds the x86_64 slice fine (universal
+          # macOS SDK; the binary is never executed during build, only signed +
+          # notarized), so we still ship a separate, smaller Intel DMG.
           - name: macOS (Intel)
-            os: macos-13
+            os: macos-14
             rust_target: x86_64-apple-darwin
             args: "--target x86_64-apple-darwin"
           - name: Linux (x86_64)
