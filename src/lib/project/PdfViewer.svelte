@@ -11,6 +11,7 @@
   import { onMount, onDestroy } from "svelte";
   import { convertFileSrc } from "@tauri-apps/api/core";
   import { getPdfSrc, getHighlightRects, type PageHighlight } from "./projectClient";
+  import { appState } from "$lib/state.svelte";
 
   let { sha512 }: { sha512: string } = $props();
 
@@ -21,11 +22,8 @@
   let linkService: any = null;
   let pdfDoc: any = null;
 
-  let currentPage = $state(1);
-  let totalPages = $state(0);
-  let scale = $state(1);
-  let loading = $state(true);
-  let error = $state<string | null>(null);
+  // Reactive toolbar state lives centrally; the PDF.js handles above stay local.
+  const pdf = appState.search.pdf;
 
   // The active highlight: a 0-based page + its rects (PDF points).
   let active: { page: number; hl: PageHighlight } | null = null;
@@ -43,11 +41,14 @@
 
   // --- Highlight appearance ------------------------------------------------
   // Painted via the canvas 2D context, so these are real compositing settings
-  // (CSS `mix-blend-mode` is inert over a <canvas> in WKWebView). Mirrors the
-  // original semantra-web: yellow, `darken` blend, 72% opacity.
-  const HL_COLOR = "rgb(255, 255, 0)";
+  // (CSS `mix-blend-mode` is inert over a <canvas> in WKWebView). Color/alpha
+  // match the shared page-highlight ink (`--color-page-highlight` in app.css and
+  // `colorFor`'s peak in highlight.ts) so highlights look identical in the txt
+  // reader, the results list, and here. `darken` over white equals normal alpha
+  // for this color, and is kept so it also protects dark text/images underneath.
+  const HL_COLOR = "rgb(255, 224, 0)";
   const HL_BLEND: GlobalCompositeOperation = "darken";
-  const HL_ALPHA = 0.72;
+  const HL_ALPHA = 0.42;
 
   /** Scroll to and highlight a chunk's span on `page` (0-based). Safe to call
    *  before the document finishes loading — it is re-applied on pagesinit. */
@@ -58,7 +59,7 @@
       if (painted && painted.page !== page) restoreClean();
       active = { page, hl };
       needScroll = true;
-      if (pdfViewer && totalPages > 0) {
+      if (pdfViewer && pdf.totalPages > 0) {
         pdfViewer.currentPageNumber = page + 1;
         drawOverlay(); // immediate if rendered; `pagerendered` covers the rest
       }
@@ -163,8 +164,10 @@
 
   async function loadDocument() {
     if (!pdfViewer || !sha512) return;
-    loading = true;
-    error = null;
+    pdf.loading = true;
+    pdf.error = null;
+    pdf.currentPage = 1;
+    pdf.totalPages = 0;
     painted = null;
     active = null;
     try {
@@ -175,12 +178,12 @@
         pdfDoc = null;
       }
       pdfDoc = await pdfjsLib.getDocument({ url }).promise;
-      totalPages = pdfDoc.numPages;
+      pdf.totalPages = pdfDoc.numPages;
       pdfViewer.setDocument(pdfDoc);
       linkService.setDocument(pdfDoc);
     } catch (e) {
-      error = e instanceof Error ? e.message : "Failed to load PDF";
-      loading = false;
+      pdf.error = e instanceof Error ? e.message : "Failed to load PDF";
+      pdf.loading = false;
     }
   }
 
@@ -206,16 +209,16 @@
 
     eventBus.on("pagesinit", () => {
       pdfViewer.currentScaleValue = "page-width";
-      scale = pdfViewer.currentScale;
-      loading = false;
+      pdf.scale = pdfViewer.currentScale;
+      pdf.loading = false;
       // A navigation requested while the document was still loading: apply it now.
       if (active) {
         pdfViewer.currentPageNumber = active.page + 1;
         drawOverlay();
       }
     });
-    eventBus.on("pagechanging", (e: any) => (currentPage = e.pageNumber));
-    eventBus.on("scalechanging", (e: any) => (scale = e.scale));
+    eventBus.on("pagechanging", (e: any) => (pdf.currentPage = e.pageNumber));
+    eventBus.on("scalechanging", (e: any) => (pdf.scale = e.scale));
     // Re-apply the overlay whenever the active page (re)renders (lazy load /
     // zoom). The canvas bitmap is brand-new and clean, so any prior snapshot is
     // stale — drop it and let `drawOverlay` snapshot + paint the fresh canvas.
@@ -238,7 +241,7 @@
   });
 
   function goToPage(p: number) {
-    if (pdfViewer && p >= 1 && p <= totalPages) pdfViewer.currentPageNumber = p;
+    if (pdfViewer && p >= 1 && p <= pdf.totalPages) pdfViewer.currentPageNumber = p;
   }
   function zoom(factor: number) {
     if (pdfViewer) pdfViewer.currentScale *= factor;
@@ -251,30 +254,36 @@
 <div class="pdf-app">
   <div class="toolbar">
     <div class="grp">
-      <button onclick={() => goToPage(currentPage - 1)} disabled={currentPage <= 1}>‹</button>
+      <button onclick={() => goToPage(pdf.currentPage - 1)} disabled={pdf.currentPage <= 1}>‹</button>
       <input
         type="number"
         min="1"
-        max={totalPages}
-        value={currentPage}
+        max={pdf.totalPages}
+        value={pdf.currentPage}
         onchange={(e) => goToPage(parseInt((e.target as HTMLInputElement).value) || 1)}
       />
-      <span class="dim">/ {totalPages}</span>
-      <button onclick={() => goToPage(currentPage + 1)} disabled={currentPage >= totalPages}
+      <span class="dim">/ {pdf.totalPages}</span>
+      <button onclick={() => goToPage(pdf.currentPage + 1)} disabled={pdf.currentPage >= pdf.totalPages}
         >›</button
       >
     </div>
     <div class="grp">
       <button onclick={() => zoom(0.8)} title="Zoom out">−</button>
-      <span class="dim">{Math.round(scale * 100)}%</span>
+      <span class="dim">{Math.round(pdf.scale * 100)}%</span>
       <button onclick={() => zoom(1.25)} title="Zoom in">+</button>
-      <button onclick={fitWidth} title="Fit width">W</button>
+      <button onclick={fitWidth} title="Fit width" aria-label="Fit width">
+        <svg viewBox="0 0 83 83" width="15" height="15" fill="none" stroke="currentColor" aria-hidden="true">
+          <path d="M40.4026 42.3164C44.2692 46.5388 49.8275 49.1866 56.0042 49.1866C67.6847 49.1866 77.1536 39.7177 77.1536 28.0372C77.1536 16.3566 67.6847 6.8877 56.0042 6.8877C44.3236 6.8877 34.8547 16.3566 34.8547 28.0372C34.8547 33.541 36.9571 38.5538 40.4026 42.3164ZM40.4026 42.3164L21.6421 61.0768" stroke-width="6.33594" stroke-linecap="round" />
+          <path d="M37.7332 58.4917L55.8199 76.5783M42.9757 76.5783H55.8199V63.7342" stroke-width="5.69523" />
+          <path d="M26.3554 45.647L8.26876 27.5603M21.1129 27.5603H8.26876V40.4045" stroke-width="5.69523" />
+        </svg>
+      </button>
     </div>
   </div>
 
   <div class="viewer-area">
-    {#if loading}<div class="overlay">Loading PDF…</div>{/if}
-    {#if error}<div class="overlay error">{error}</div>{/if}
+    {#if pdf.loading}<div class="overlay">Loading PDF…</div>{/if}
+    {#if pdf.error}<div class="overlay error">{pdf.error}</div>{/if}
     <div bind:this={viewerContainer} class="viewer-container">
       <div class="pdfViewer"></div>
     </div>
@@ -304,6 +313,9 @@
     gap: 6px;
   }
   .toolbar button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     min-width: 26px;
     height: 26px;
     border: 1px solid var(--color-border-soft);
@@ -320,6 +332,7 @@
     width: 44px;
     height: 26px;
     text-align: center;
+    font-size: 0.85rem;
     border: 1px solid var(--color-border-soft);
     border-radius: var(--radius-sm);
     background: var(--color-bg);

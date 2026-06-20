@@ -15,6 +15,20 @@ export interface ParsedQuery {
   literals: string[];
 }
 
+/**
+ * Fold typographic "smart" quotes back to straight ASCII quotes. macOS text
+ * substitution (and pasted prose) turns `"` into `“`/`”` and `'` into `‘`/`’`,
+ * which would otherwise break the `"quoted literal"` query syntax. Used both by
+ * the search input (so nothing smart is ever shown) and by the parser (so a
+ * pasted smart-quoted query still works). The mapping is 1:1, so it never shifts
+ * character offsets / the caret.
+ */
+const SMART_DOUBLE = /[“”„‟]/g;
+const SMART_SINGLE = /[‘’‚‛]/g;
+export function normalizeQuotes(raw: string): string {
+  return raw.replace(SMART_DOUBLE, '"').replace(SMART_SINGLE, "'");
+}
+
 /** Pull `"quoted"` spans out as literals; returns the remainder + literals. */
 function extractLiterals(raw: string): { remainder: string; literals: string[] } {
   let remainder = "";
@@ -67,6 +81,6 @@ function parseWeightedTerms(text: string): WeightedTerm[] {
 }
 
 export function parseQuery(raw: string): ParsedQuery {
-  const { remainder, literals } = extractLiterals(raw);
+  const { remainder, literals } = extractLiterals(normalizeQuotes(raw));
   return { semantic: parseWeightedTerms(remainder), literals };
 }

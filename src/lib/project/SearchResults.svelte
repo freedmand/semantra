@@ -1,74 +1,15 @@
 <script lang="ts">
   // Results sidebar: file-grouped (collapsible) or flat excerpt view, with a
   // filename filter, expand/collapse-all, and a "solo the active doc" toggle.
-  // Ported from semantra-web's SearchResults to Svelte 5 + Tailwind.
-  import type { Explanation } from "$lib/embedding/search";
-  import type { ProjectHit } from "./projectClient";
+  // Reads the central search state directly; grouping/excerpt are derived
+  // subviews on appState. Ported from semantra-web's SearchResults.
+  import { appState } from "$lib/state.svelte";
   import SearchResult from "./SearchResult.svelte";
 
-  let {
-    results,
-    preferences,
-    explanations,
-    activeSha = null,
-    unsearched,
-    onNavigate,
-    onSetPreference,
-  }: {
-    results: ProjectHit[];
-    preferences: Record<number, { weight: number }>;
-    explanations: Record<number, Explanation | null>;
-    activeSha?: string | null;
-    unsearched: boolean;
-    onNavigate: (hit: ProjectHit) => void;
-    onSetPreference: (hit: ProjectHit, weight: number) => void;
-  } = $props();
-
-  let filenameFilter = $state("");
-  let filterViewed = $state(false);
-  let excerptView = $state(false);
-  let detailReverse = $state(false);
-  let closed = $state<Record<string, boolean>>({});
-
-  interface Group {
-    sha512: string;
-    basename: string;
-    hits: ProjectHit[];
-    score: number;
-  }
-
-  // Group hits by file, score each group by its best hit, sort high → low.
-  const groups = $derived.by<Group[]>(() => {
-    const byFile = new Map<string, Group>();
-    for (const hit of results) {
-      let g = byFile.get(hit.sha512);
-      if (!g) {
-        g = { sha512: hit.sha512, basename: hit.basename, hits: [], score: 0 };
-        byFile.set(hit.sha512, g);
-      }
-      g.hits.push(hit);
-    }
-    const out = [...byFile.values()];
-    for (const g of out) {
-      g.hits.sort((a, b) => b.score - a.score);
-      g.score = g.hits.reduce((s, h) => s + h.score, 0) / g.hits.length;
-    }
-    out.sort((a, b) => b.score - a.score);
-    return out.filter((g) => (filterViewed && activeSha ? g.sha512 === activeSha : true));
-  });
-
-  const excerpt = $derived(
-    [...results]
-      .sort((a, b) => b.score - a.score)
-      .filter((h) => (filterViewed && activeSha ? h.sha512 === activeSha : true)),
-  );
+  const search = appState.search;
 
   function matchesFilter(basename: string): boolean {
-    return basename.toLowerCase().includes(filenameFilter.toLowerCase());
-  }
-
-  function prefWeight(index: number): number {
-    return preferences[index]?.weight ?? 0;
+    return basename.toLowerCase().includes(search.filenameFilter.toLowerCase());
   }
 </script>
 
@@ -83,33 +24,33 @@
         class="border rounded-sm bg-white py-1 pl-8 font-mono flex-1 w-full"
         style="border-color: var(--color-border); color: #0f0f0f;"
         placeholder="Filter files"
-        bind:value={filenameFilter}
+        bind:value={search.filenameFilter}
       />
       <div class="icon filter-icon" aria-hidden="true"></div>
     </div>
-    {#if !excerptView}
+    {#if !search.excerptView}
       <button
         class="icon-btn toggle-detail-icon"
         title="Expand / collapse all"
         onclick={() => {
-          detailReverse = !detailReverse;
-          closed = {};
+          search.detailReverse = !search.detailReverse;
+          search.closed = {};
         }}
         aria-label="Expand or collapse all"
       ></button>
     {/if}
     <button
       class="icon-btn solo-icon"
-      class:active={filterViewed}
-      disabled={activeSha == null}
-      title={filterViewed ? "Show all files" : "Filter to current document"}
-      onclick={() => (filterViewed = !filterViewed)}
+      class:active={search.filterViewed}
+      disabled={appState.searchActiveDoc == null}
+      title={search.filterViewed ? "Show all files" : "Filter to current document"}
+      onclick={() => (search.filterViewed = !search.filterViewed)}
       aria-label="Filter to current document"
     ></button>
     <button
       class="icon-btn toggle-view-icon"
       title="Toggle file / excerpt view"
-      onclick={() => (excerptView = !excerptView)}
+      onclick={() => (search.excerptView = !search.excerptView)}
       aria-label="Toggle view"
     ></button>
   </div>
@@ -117,32 +58,32 @@
   <!-- List -->
   <div class="flex-1 relative">
     <div class="absolute inset-0 break-words overflow-y-auto pb-2">
-      {#if unsearched}
+      {#if search.unsearched}
         <div class="m-2 font-mono text-sm" style="color: var(--color-text-muted);">
           Enter a search query above and press Enter.
         </div>
-      {:else if excerptView}
+      {:else if search.excerptView}
         <ul>
-          {#each excerpt as hit (hit.index)}
+          {#each appState.searchExcerpt as hit (hit.index)}
             {#if matchesFilter(hit.basename)}
               <SearchResult
                 {hit}
-                preference={prefWeight(hit.index)}
-                explanation={explanations[hit.index] ?? null}
+                explanation={search.explanations[hit.index] ?? null}
                 showFilename={true}
-                {onNavigate}
-                {onSetPreference}
               />
             {/if}
           {/each}
         </ul>
       {:else}
-        {#each groups as group (group.sha512)}
+        {#each appState.searchGroups as group (group.sha512)}
           {#if matchesFilter(group.basename)}
-            <details open={detailReverse ? closed[group.sha512] : !closed[group.sha512]}
+            <details open={search.detailReverse ? search.closed[group.sha512] : !search.closed[group.sha512]}
               ontoggle={(e) => {
                 const open = (e.target as HTMLDetailsElement).open;
-                closed = { ...closed, [group.sha512]: detailReverse ? open : !open };
+                search.closed = {
+                  ...search.closed,
+                  [group.sha512]: search.detailReverse ? open : !open,
+                };
               }}
             >
               <summary
@@ -158,11 +99,8 @@
                 {#each group.hits as hit (hit.index)}
                   <SearchResult
                     {hit}
-                    preference={prefWeight(hit.index)}
-                    explanation={explanations[hit.index] ?? null}
+                    explanation={search.explanations[hit.index] ?? null}
                     showFilename={false}
-                    {onNavigate}
-                    {onSetPreference}
                   />
                 {/each}
               </ul>

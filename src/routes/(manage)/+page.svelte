@@ -4,8 +4,8 @@
   // zone — dropping files here spins up a new project (named after the first
   // file) and steps into it.
   import { goto } from "$app/navigation";
-  import { createProject, addFilesToProject } from "$lib/project/projectClient";
-  import { refreshProjects } from "$lib/project/projectsStore.svelte";
+  import { addFilesToProject } from "$lib/project/projectClient";
+  import { createProject } from "$lib/state.svelte";
   import FileDropZone from "$lib/project/FileDropZone.svelte";
 
   let busy = $state(false);
@@ -17,9 +17,10 @@
       const base = paths[0].split(/[\\/]/).pop() ?? "New project";
       const name = base.replace(/\.[^.\\/]+$/, "") || "New project";
       const id = crypto.randomUUID();
+      // `createProject` (central) refreshes the project list; the new project has
+      // no manage view loaded yet, so add files via the client directly.
       await createProject(id, name);
       await addFilesToProject(id, paths);
-      await refreshProjects();
       goto(`/project?id=${encodeURIComponent(id)}`);
     } finally {
       busy = false;

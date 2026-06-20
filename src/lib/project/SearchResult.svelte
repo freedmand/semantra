@@ -1,29 +1,28 @@
 <script lang="ts">
   // One search result row: score badge, +/- relevance-feedback buttons, and the
   // (optionally highlighted) snippet. Clicking the row navigates into the doc.
+  // Per-row data (`hit`, `explanation`) comes in as props; preference state and
+  // the navigate/set-preference actions come from the central appState.
   import type { Explanation } from "$lib/embedding/search";
   import type { ProjectHit } from "./projectClient";
+  import { appState, setPreference, jumpToResult } from "$lib/state.svelte";
   import SearchResultText from "./SearchResultText.svelte";
 
   let {
     hit,
-    preference = 0,
     explanation = null,
     showFilename = false,
-    onNavigate,
-    onSetPreference,
   }: {
     hit: ProjectHit;
-    preference?: number;
     explanation?: Explanation | null;
     showFilename?: boolean;
-    onNavigate: (hit: ProjectHit) => void;
-    onSetPreference: (hit: ProjectHit, weight: number) => void;
   } = $props();
+
+  const preference = $derived(appState.search.preferences[hit.index]?.weight ?? 0);
 
   function setPref(e: Event, weight: number) {
     e.stopPropagation();
-    onSetPreference(hit, weight);
+    setPreference(hit, weight);
   }
 </script>
 
@@ -32,7 +31,7 @@
 <li
   class="font-mono text-sm border-b last:border-0 py-4 px-4 cursor-pointer"
   style="border-color: var(--color-border);"
-  onclick={() => onNavigate(hit)}
+  onclick={() => jumpToResult(hit)}
 >
   <div
     class="border-l-4 pl-2 -ml-2"

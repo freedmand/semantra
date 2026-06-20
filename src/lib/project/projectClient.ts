@@ -63,13 +63,17 @@ export interface IndexEvent {
   error: string;
 }
 
+/** A document's kind, as understood by the reader UI. */
+export type Filetype = "text" | "pdf" | "csv";
+
 /** A document in the project (tab bar + sidebar grouping). */
 export interface DocMeta {
   sha512: string;
   basename: string;
-  filetype: "text" | "pdf";
+  filetype: Filetype;
   pageCount: number | null;
   byteLen: number;
+  wordCount: number;
 }
 
 /** One search hit, enriched for navigation + highlighting. Mirrors Rust `ProjectHit`. */
@@ -78,16 +82,27 @@ export interface ProjectHit {
   index: number;
   sha512: string;
   basename: string;
-  filetype: "text" | "pdf";
+  filetype: Filetype;
   text: string;
   distance: number;
   score: number;
   /** Char offsets into the document's canonical full text (flat text reader). */
   charStart: number;
   charEnd: number;
-  /** Page (0-based) and page-relative char offset for PDF highlighting. */
+  /**
+   * Page (0-based) and page-relative char offset for PDF highlighting. For CSV
+   * documents these are repurposed: `page` is the 0-based data-row index and
+   * `pageCharStart` is the 0-based column index, so the grid reader navigates to
+   * the matched cell by (row, col).
+   */
   page: number | null;
   pageCharStart: number;
+}
+
+/** A parsed CSV document: header row + data rows, all cells verbatim. */
+export interface CsvData {
+  headers: string[];
+  rows: string[][];
 }
 
 /** A relevance-feedback preference sent back to refine the next search. */
@@ -177,6 +192,11 @@ export async function getDocumentText(sha512: string): Promise<string> {
 /** Filesystem path of a document's copied bytes (wrap with `convertFileSrc`). */
 export async function getPdfSrc(sha512: string): Promise<string> {
   return await invoke<string>("get_pdf_src", { sha512 });
+}
+
+/** Parsed grid (headers + rows, verbatim cells) of a CSV document, for the grid reader. */
+export async function getCsvData(sha512: string): Promise<CsvData> {
+  return await invoke<CsvData>("get_csv_data", { sha512 });
 }
 
 /**

@@ -9,8 +9,8 @@
  *   - granularity   — aggregate tokens into words / raw tokens / sentences
  *   - faithfulness  — normalize per-chunk ("relative") or on a fixed scale
  *                     comparable across chunks ("absolute")
- *   - color         — {@link colorFor} maps a signed weight to a diverging
- *                     (green ↑ / red ↓) background
+ *   - color         — {@link colorFor} maps a positive weight to a green
+ *                     background (negative contributions are not shown)
  *
  * Token offsets are UTF-8 **byte** offsets, so all slicing goes through a byte
  * array (correct for non-ASCII text, unlike JS string indexing).
@@ -35,20 +35,27 @@ export interface HighlightOptions {
   /** Per-span contribution that maps to full saturation in "absolute" mode. */
   absoluteScale: number;
   /**
-   * Max difference in normalized weight (color, ~[0, 2]) between neighbouring
-   * highlights for them to fuse into one patch (see {@link consolidate}). Keep
-   * it tight so similar-scoring neighbours coalesce while real jumps stay as
-   * patch boundaries. `0` disables consolidation.
+   * Number of words each highlight patch spans. We don't paint every word;
+   * instead we pick the few strongest positive windows of roughly this width
+   * (see {@link toSegments}), so a chunk reads as a couple of sharp green
+   * highlights instead of a per-word stipple.
    */
-  consolidateDelta: number;
+  windowWords: number;
+  /**
+   * How many highlight patches to show per chunk at most. Only the top windows
+   * by positive contribution are kept; everything else stays plain. Negative
+   * ("red") contributions are never shown.
+   */
+  maxHighlights: number;
 }
 
-/** Chosen defaults: word-level, vivid per-chunk, diverging color. */
+/** Chosen defaults: word-level, vivid per-chunk, a few green patches. */
 export const DEFAULT_HIGHLIGHT: HighlightOptions = {
   granularity: "word",
   faithfulness: "relative",
   absoluteScale: 0.05,
-  consolidateDelta: 0.1,
+  windowWords: 10,
+  maxHighlights: 2,
 };
 
 /** A contiguous run of chunk text plus its highlight weight. */
@@ -57,7 +64,9 @@ export interface Segment {
   /** Normalized signed weight in [-1, 1]; 0 means a plain (un-highlighted) run. */
   weight: number;
   /** The raw, un-normalized contribution behind this run (for tooltips). */
-  score: number;
+  score?: number;
+  /** Set when this run is an exact match for a quoted keyword literal. */
+  keyword?: boolean;
 }
 
 /** An aggregated group of tokens over a byte range. */
@@ -65,7 +74,18 @@ interface Span {
   start: number;
   end: number;
   score: number;
+  /** How many model tokens were folded into this span (for the baseline below). */
+  tokens: number;
 }
+
+/**
+ * Below this |bias| we treat the model as having emitted no constant term. Some
+ * heads (e.g. mdbr-leaf-mt) have no Dense bias, so the exact decomposition has
+ * nothing to absorb the baseline every token shares — all contributions land on
+ * the same side of zero and the diverging green/red color collapses to one hue.
+ * Models that DO carry a bias (e.g. mdbr-leaf-ir, ~0.13) need no compensation.
+ */
+const BIAS_EPSILON = 1e-3;
 
 const decoder = new TextDecoder();
 
@@ -98,7 +118,8 @@ function pushHighlighted(
   }
   const trail = text.match(/[^\p{L}\p{N}]+$/u)?.[0].length ?? 0;
   const mid = text.length - trail;
-  if (lead > 0) segments.push({ text: text.slice(0, lead), weight: 0, score: 0 });
+  if (lead > 0)
+    segments.push({ text: text.slice(0, lead), weight: 0, score: 0 });
   segments.push({ text: text.slice(lead, mid), weight, score });
   if (trail > 0) segments.push({ text: text.slice(mid), weight: 0, score: 0 });
 }
@@ -139,7 +160,12 @@ function aggregate(
   const real = tokens.filter((t) => !t.special && t.end > t.start);
 
   if (granularity === "token") {
-    return real.map((t) => ({ start: t.start, end: t.end, score: t.score }));
+    return real.map((t) => ({
+      start: t.start,
+      end: t.end,
+      score: t.score,
+      tokens: 1,
+    }));
   }
 
   const starts = granularity === "sentence" ? sentenceStarts(bytes) : [];
@@ -161,19 +187,142 @@ function aggregate(
       existing.start = Math.min(existing.start, t.start);
       existing.end = Math.max(existing.end, t.end);
       existing.score += t.score; // contributions are additive
+      existing.tokens += 1;
     } else {
-      groups.set(key, { start: t.start, end: t.end, score: t.score });
+      groups.set(key, {
+        start: t.start,
+        end: t.end,
+        score: t.score,
+        tokens: 1,
+      });
     }
   });
 
-  return [...groups.values()].sort((a, b) => a.start - b.start);
+  const sorted = [...groups.values()].sort((a, b) => a.start - b.start);
+  if (granularity !== "word") return sorted;
+
+  // Coalesce adjacent spans that aren't separated by whitespace into one whole
+  // word. The tokenizer's pre-tokenizer splits on punctuation, so `Alice's`
+  // arrives as `Alice` / `'` / `s` with distinct wordIds and would otherwise
+  // form three spans — letting a highlight start at a bare `'s`. Merging by the
+  // absence of intervening whitespace matches the chunker's word definition.
+  const merged: Span[] = [];
+  for (const s of sorted) {
+    const prev = merged[merged.length - 1];
+    const between =
+      prev && s.start > prev.end
+        ? decoder.decode(bytes.subarray(prev.end, s.start))
+        : "";
+    if (prev && !/\s/u.test(between)) {
+      prev.end = Math.max(prev.end, s.end);
+      prev.score += s.score;
+      prev.tokens += s.tokens;
+    } else {
+      merged.push({ ...s });
+    }
+  }
+  return merged;
 }
 
 /**
- * Turn an {@link Explanation} into an ordered list of {@link Segment}s that
- * together cover the entire `text` (highlighted spans interleaved with plain
- * gaps), ready to render.
+ * Smith-Waterman-style span scoring. A visibly-green span rewards
+ * {@link GREEN_BASE} plus its severity (so a stronger green pulls a segment
+ * together harder); a plain/gap span costs {@link GAP_PENALTY}, so a segment
+ * only stretches across gaps that the surrounding greens can pay for.
  */
+const GREEN_BASE = 0.7; // green points lie in [GREEN_BASE, GREEN_BASE + 1]
+const GAP_PENALTY = 0.5;
+
+/**
+ * A run shorter than {@link MIN_SPAN_WORDS} spans is docked
+ * {@link SHORT_WORD_PENALTY} for each word it falls short, so a strong word or
+ * two can't win a run alone; the penalty fades to zero once a run is long
+ * enough. (Spans are ~one word at "word" granularity, so we count spans.)
+ */
+const MIN_SPAN_WORDS = 5;
+const SHORT_WORD_PENALTY = 0.4;
+
+/**
+ * A run longer than {@link MAX_SPAN_WORDS} spans is docked an *increasing*
+ * penalty: {@link LONG_WORD_PENALTY} for the 1st word over the limit, twice that
+ * for the 2nd, and so on (a triangular sum, ∝ over²). A block therefore stops
+ * growing once the marginal green stops paying for the marginal length, keeping
+ * a couple of tight blocks instead of one chunk-spanning wash.
+ */
+const MAX_SPAN_WORDS = 15;
+const LONG_WORD_PENALTY = 0.2;
+
+/**
+ * Per-span color intensity OUTSIDE the winning runs: the full per-word
+ * highlighting is still shown, scaled down to this fraction so the winning
+ * blocks clearly dominate.
+ */
+const MUTED_INTENSITY = 0.3;
+
+/**
+ * Smith-Waterman-style local selection over a 1-D sequence of span points.
+ * Repeatedly takes the maximum-scoring contiguous run — Kadane's reset to zero
+ * is exactly the SW recurrence `H[i] = max(0, H[i-1] + points[i])` — masks it,
+ * and repeats, yielding up to `cap` non-overlapping, strictly-positive segments.
+ * Each run starts and ends on a positive (green) span, since a leading/trailing
+ * penalty never improves the running max, but it absorbs interior gaps the
+ * surrounding greens outweigh.
+ *
+ * A run still shorter than `minLen` spans is scored down by `shortPenalty` for
+ * each span it falls short, and a run past `maxLen` is scored down by an
+ * increasing `longPenalty` (∝ overshoot²) — together they bias runs toward the
+ * `[minLen, maxLen]` band. The accumulation itself stays raw (the reset still
+ * keys off the running sum); the penalties only bias which `(start, end)` we
+ * record as best. Returns span-index ranges `[start, end)` in document order.
+ */
+function topScoringSpans(
+  points: number[],
+  cap: number,
+  minLen = 0,
+  shortPenalty = 0,
+  maxLen = Infinity,
+  longPenalty = 0,
+): Array<{ start: number; end: number }> {
+  const n = points.length;
+  const used = new Array<boolean>(n).fill(false);
+  const out: Array<{ start: number; end: number }> = [];
+  for (let k = 0; k < cap; k++) {
+    let best = 0; // require a strictly positive (length-adjusted) run
+    let bestStart = -1;
+    let bestEnd = -1;
+    let cur = 0;
+    let curStart = 0;
+    for (let i = 0; i < n; i++) {
+      if (used[i]) {
+        cur = 0;
+        curStart = i + 1; // already-claimed spans are hard barriers
+        continue;
+      }
+      if (cur <= 0) {
+        cur = points[i];
+        curStart = i;
+      } else {
+        cur += points[i];
+      }
+      const len = i - curStart + 1;
+      const over = Math.max(0, len - maxLen);
+      const adjusted =
+        cur -
+        shortPenalty * Math.max(0, minLen - len) -
+        (longPenalty * over * (over + 1)) / 2;
+      if (adjusted > best) {
+        best = adjusted;
+        bestStart = curStart;
+        bestEnd = i + 1;
+      }
+    }
+    if (bestStart < 0) break; // nothing positive left
+    for (let j = bestStart; j < bestEnd; j++) used[j] = true;
+    out.push({ start: bestStart, end: bestEnd });
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
 export function toSegments(
   text: string,
   explanation: Explanation,
@@ -182,143 +331,355 @@ export function toSegments(
   const bytes = new TextEncoder().encode(text);
   const spans = aggregate(bytes, explanation.tokens, options.granularity);
 
-  // Normalization divisor: chunk-max for "relative", a fixed scale otherwise.
+  // When the model emitted no bias term, synthesize the midpoint it omitted: the
+  // mean per-token contribution (= cosine / N for this chunk). Subtracting it
+  // recenters the spans around zero so coloring shows each word's deviation from
+  // the average — restoring green/red. This is the true per-chunk midpoint, which
+  // is why it can't be a single hard-coded constant (it scales with chunk length
+  // and the chunk's own score). Models with a real bias keep their natural sign.
+  const tokenTotal = spans.reduce((n, s) => n + s.tokens, 0);
+  const scoreTotal = spans.reduce((a, s) => a + s.score, 0);
+  const baseline =
+    Math.abs(explanation.bias) < BIAS_EPSILON && tokenTotal > 0
+      ? scoreTotal / tokenTotal
+      : 0;
+  // A span's contribution relative to the baseline (its share of the baseline is
+  // proportional to how many tokens it folded in). Only positive contributions
+  // are ever highlighted — negatives ("red") are dropped to zero.
+  const colorScore = (s: Span) => Math.max(s.score - s.tokens * baseline, 0);
+
+  // Normalized severity in [0, 1]: relative to the chunk's strongest span, or a
+  // fixed scale. Drives both the SW scoring and the rendered color intensity.
   let norm: number;
   if (options.faithfulness === "relative") {
-    const maxAbs = spans.reduce((m, s) => Math.max(m, Math.abs(s.score)), 0);
-    norm = maxAbs > 0 ? maxAbs : 1;
+    const maxPos = spans.reduce((m, s) => Math.max(m, colorScore(s)), 0);
+    norm = maxPos > 0 ? maxPos : 1;
   } else {
     norm = options.absoluteScale > 0 ? options.absoluteScale : 1;
   }
+  const severity = (s: Span) => clamp(colorScore(s) / norm, 0, 1);
+
+  // Smith-Waterman selection over the span sequence: visible greens earn points,
+  // plain/gap spans bleed them, and we keep only the top few contiguous runs.
+  const points = spans.map((s) => {
+    const sev = severity(s);
+    return sev > 0 ? GREEN_BASE + sev : -GAP_PENALTY;
+  });
+  const segments = topScoringSpans(
+    points,
+    options.maxHighlights,
+    MIN_SPAN_WORDS,
+    SHORT_WORD_PENALTY,
+    MAX_SPAN_WORDS,
+    LONG_WORD_PENALTY,
+  );
+  const segByStart = new Map(segments.map((seg) => [seg.start, seg]));
+
+  const results: Segment[] = [];
+
+  let lastSpan = 0;
+  const slice = (start: number, end: number) =>
+    decoder.decode(bytes.subarray(start, end));
+
+  const flushSpan = (start: number) => {
+    if (start > lastSpan) {
+      results.push({
+        score: 0,
+        weight: 0,
+        text: slice(lastSpan, start),
+      });
+      lastSpan = start;
+    }
+  };
+
+  // Walk the spans. A winning run renders as ONE solid block (gaps and all) at
+  // the mean severity of its greens; every other span keeps its own per-word
+  // color, just muted, so the winning blocks clearly dominate.
+  let i = 0;
+  while (i < spans.length) {
+    const seg = segByStart.get(i);
+    if (seg) {
+      const startByte = spans[seg.start].start;
+      const endByte = spans[seg.end - 1].end;
+      flushSpan(startByte);
+
+      let sum = 0;
+      let greens = 0;
+      let score = 0;
+      for (let j = seg.start; j < seg.end; j++) {
+        const sev = severity(spans[j]);
+        if (sev > 0) {
+          sum += sev;
+          greens += 1;
+        }
+        score += spans[j].score;
+      }
+      pushHighlighted(
+        results,
+        slice(startByte, endByte),
+        greens > 0 ? sum / greens : 0,
+        score,
+      );
+      lastSpan = endByte;
+      i = seg.end;
+    } else {
+      const span = spans[i];
+      flushSpan(span.start);
+      pushHighlighted(
+        results,
+        slice(span.start, span.end),
+        severity(span) * MUTED_INTENSITY,
+        span.score,
+      );
+      lastSpan = span.end;
+      i += 1;
+    }
+  }
+  flushSpan(text.length);
+
+  return results;
+}
+
+/**
+ * Turn an {@link Explanation} into an ordered list of {@link Segment}s that
+ * together cover the entire `text` (highlighted spans interleaved with plain
+ * gaps), ready to render.
+ */
+export function toSegments2(
+  text: string,
+  explanation: Explanation,
+  options: HighlightOptions = DEFAULT_HIGHLIGHT,
+): Segment[] {
+  const bytes = new TextEncoder().encode(text);
+  const spans = aggregate(bytes, explanation.tokens, options.granularity);
+
+  // When the model emitted no bias term, synthesize the midpoint it omitted: the
+  // mean per-token contribution (= cosine / N for this chunk). Subtracting it
+  // recenters the spans around zero so coloring shows each word's deviation from
+  // the average — restoring green/red. This is the true per-chunk midpoint, which
+  // is why it can't be a single hard-coded constant (it scales with chunk length
+  // and the chunk's own score). Models with a real bias keep their natural sign.
+  const tokenTotal = spans.reduce((n, s) => n + s.tokens, 0);
+  const scoreTotal = spans.reduce((a, s) => a + s.score, 0);
+  const baseline =
+    Math.abs(explanation.bias) < BIAS_EPSILON && tokenTotal > 0
+      ? scoreTotal / tokenTotal
+      : 0;
+  // A span's contribution relative to the baseline (its share of the baseline is
+  // proportional to how many tokens it folded in). Only positive contributions
+  // are ever highlighted — negatives ("red") are dropped to zero.
+  const colorScore = (s: Span) => Math.max(s.score - s.tokens * baseline, 0);
+
+  // Normalization divisor: strongest positive span for "relative" (so the best
+  // word in this chunk is full saturation), a fixed scale otherwise.
+  let norm: number;
+  if (options.faithfulness === "relative") {
+    const maxPos = spans.reduce((m, s) => Math.max(m, colorScore(s)), 0);
+    norm = maxPos > 0 ? maxPos : 1;
+  } else {
+    norm = options.absoluteScale > 0 ? options.absoluteScale : 1;
+  }
+  const weightOf = (s: Span) => clamp(colorScore(s) / norm, 0, 1);
+
+  // Pick the few strongest positive windows: slide a fixed-width window over the
+  // spans and greedily take the highest-weight non-overlapping ones, up to the
+  // cap. Everything outside a chosen window renders plain.
+  const windows = selectWindows(
+    spans,
+    weightOf,
+    options.windowWords,
+    options.maxHighlights,
+  );
 
   const slice = (start: number, end: number) =>
     decoder.decode(bytes.subarray(start, end));
 
   const segments: Segment[] = [];
   let cursor = 0;
-  for (const span of spans) {
-    if (span.start > cursor) {
-      segments.push({ text: slice(cursor, span.start), weight: 0, score: 0 });
+  for (const win of windows) {
+    const wStart = spans[win.start].start;
+    const wEnd = spans[win.end - 1].end;
+    if (wStart > cursor) {
+      segments.push({ text: slice(cursor, wStart), weight: 0, score: 0 });
     }
-    const start = Math.max(span.start, cursor); // guard against any overlap
-    if (span.end > start) {
-      pushHighlighted(
-        segments,
-        slice(start, span.end),
-        clamp(span.score / norm, -1, 1),
-        span.score,
-      );
+    const start = Math.max(wStart, cursor); // guard against any overlap
+    if (wEnd > start) {
+      pushHighlighted(segments, slice(start, wEnd), win.weight, win.score);
     }
-    cursor = Math.max(cursor, span.end);
+    cursor = Math.max(cursor, wEnd);
   }
   if (cursor < bytes.length) {
     segments.push({ text: slice(cursor, bytes.length), weight: 0, score: 0 });
   }
-  return consolidate(segments, options.consolidateDelta);
+  return segments;
+}
+
+/** A chosen highlight window over a contiguous run of spans `[start, end)`. */
+interface Window {
+  start: number; // first span index (inclusive)
+  end: number; // last span index (exclusive)
+  weight: number; // mean span weight, for color intensity
+  score: number; // Σ raw contribution, for tooltips
 }
 
 /**
- * Fuse neighbouring highlights of similar color into patches.
- *
- * When every word carries some weight, a per-word highlight reads as visual
- * noise — a stipple of slightly different greens. This smooths it by
- * agglomerative clustering on *color distance*: neighbouring spans whose
- * normalized weights are within `maxDelta` collapse into one run that assumes
- * their (length-weighted) average, painting over the whitespace/punctuation
- * between them so the patch is contiguous.
- *
- * It is iterative on purpose. Each round fuses the single closest-in-color
- * adjacent pair, then re-evaluates — because the merged run's new average
- * shifts its distance to *both* neighbours, which can open or close later
- * merges. It repeats until the closest remaining neighbours differ by more than
- * `maxDelta` (the "no more moves" fixpoint), leaving real score jumps as patch
- * boundaries so the result stays dynamic. O(n²) worst case over the highlights
- * in one chunk — trivially fast at these sizes.
- *
- * Returns a fresh segment list; the input is not mutated. A non-positive
- * `maxDelta`, or fewer than two highlights, returns the segments unchanged.
+ * Greedily select up to `cap` non-overlapping, fixed-width windows of spans,
+ * each maximizing total positive {@link weightOf}. The window is `width` spans
+ * wide (clamped to the chunk length), and only windows with some positive
+ * weight are kept — so a chunk with little signal yields fewer (or no) patches
+ * rather than padding weak highlights. Returned in document order.
  */
-export function consolidate(segments: Segment[], maxDelta: number): Segment[] {
-  if (maxDelta <= 0) return segments;
+function selectWindows(
+  spans: Span[],
+  weightOf: (s: Span) => number,
+  width: number,
+  cap: number,
+): Window[] {
+  const n = spans.length;
+  if (n === 0 || cap <= 0) return [];
+  const w = Math.max(1, Math.min(width, n));
+  const weights = spans.map(weightOf);
 
-  // One run per highlight, located by character offset in the full text. The
-  // length-weighted score sum keeps a merged run's average independent of the
-  // order spans were folded in.
-  interface Run {
-    start: number;
-    end: number;
-    weighted: number; // Σ weightᵢ · lenᵢ over highlighted chars
-    chars: number; // Σ lenᵢ
-    score: number; // Σ raw contribution (additive)
-  }
-  const runs: Run[] = [];
-  let pos = 0;
-  for (const seg of segments) {
-    const len = seg.text.length;
-    if (seg.weight !== 0) {
-      runs.push({
-        start: pos,
-        end: pos + len,
-        weighted: seg.weight * len,
-        chars: len,
-        score: seg.score,
-      });
-    }
-    pos += len;
-  }
-  if (runs.length < 2) return segments;
-
-  const weightOf = (r: Run) => r.weighted / r.chars;
-
-  // Agglomerative merge: fuse the closest-in-color adjacent pair each round
-  // until none are within maxDelta.
-  let merged = false;
-  for (;;) {
-    let best = -1;
-    let bestDelta = Infinity;
-    for (let i = 0; i + 1 < runs.length; i++) {
-      const d = Math.abs(weightOf(runs[i]) - weightOf(runs[i + 1]));
-      if (d < bestDelta) {
-        bestDelta = d;
-        best = i;
+  const taken = new Array<boolean>(n).fill(false);
+  const chosen: Window[] = [];
+  for (let k = 0; k < cap; k++) {
+    let bestStart = -1;
+    let bestSum = 0; // require strictly positive — a zero-weight window is noise
+    for (let i = 0; i + w <= n; i++) {
+      let overlaps = false;
+      let sum = 0;
+      for (let j = i; j < i + w; j++) {
+        if (taken[j]) {
+          overlaps = true;
+          break;
+        }
+        sum += weights[j];
+      }
+      if (!overlaps && sum > bestSum) {
+        bestSum = sum;
+        bestStart = i;
       }
     }
-    if (best < 0 || bestDelta > maxDelta) break;
-    const a = runs[best];
-    const b = runs[best + 1];
-    a.end = b.end; // absorb b and the plain gap between them
-    a.weighted += b.weighted;
-    a.chars += b.chars;
-    a.score += b.score;
-    runs.splice(best + 1, 1);
-    merged = true;
-  }
-
-  if (!merged) return segments; // Nothing was close enough; leave as-is.
-
-  // Repaint: plain gaps between runs, each run at its averaged weight.
-  const fullText = segments.map((s) => s.text).join("");
-  const out: Segment[] = [];
-  let cursor = 0;
-  for (const run of runs) {
-    if (run.start > cursor) {
-      out.push({ text: fullText.slice(cursor, run.start), weight: 0, score: 0 });
+    if (bestStart < 0) break;
+    let sumWeight = 0;
+    let sumScore = 0;
+    for (let j = bestStart; j < bestStart + w; j++) {
+      taken[j] = true;
+      sumWeight += weights[j];
+      sumScore += spans[j].score;
     }
-    out.push({
-      text: fullText.slice(run.start, run.end),
-      weight: run.weighted / run.chars,
-      score: run.score,
+    chosen.push({
+      start: bestStart,
+      end: bestStart + w,
+      weight: sumWeight / w,
+      score: sumScore,
     });
-    cursor = run.end;
   }
-  if (cursor < fullText.length) {
-    out.push({ text: fullText.slice(cursor), weight: 0, score: 0 });
-  }
-  return out;
+
+  return chosen.sort((a, b) => a.start - b.start);
 }
 
-/** Background alpha at full saturation. */
-const MAX_ALPHA = 0.6;
+/**
+ * Minimum keyword-prefix length that gets highlighted. Mirrors the backend's
+ * `MIN_PREFIX_LEN` (src-tauri/src/query.rs), which is the trigram floor of the
+ * n-gram search index: tokens shorter than this can't be matched by the index,
+ * so they're dropped from both the search filter and the highlight. Keep in sync.
+ */
+const MIN_PREFIX_LEN = 3;
+
+/**
+ * Split segments at word-*prefix* matches of any quoted keyword literal, flagging
+ * the matched word with `keyword: true` (preserving each parent run's
+ * weight/score). Matching is word-prefix and case-insensitive, mirroring the
+ * backend keyword filter — so `green` flags the whole word `greenhouse` (a word
+ * starting with the literal) but not `evergreen` (mid-word). The full matched
+ * word is highlighted, not just the typed prefix. Returns the segments unchanged
+ * when there are no literals.
+ *
+ * Matching runs over the **full concatenated text**, not per-segment, so a
+ * literal that straddles segment boundaries is still found — e.g. `text:` after
+ * `toSegments` has split it into a `text` run and a `:` run (which previously
+ * dropped the keyword box once the async explanation re-rendered the snippet).
+ * Each match range is then sliced back onto whatever segments it overlaps, so the
+ * matched piece inherits its parent run's weight.
+ */
+export function markKeywords(
+  segments: Segment[],
+  literals: string[],
+): Segment[] {
+  const tokens = literals
+    .flatMap((l) => l.split(/\s+/))
+    .map((t) => t.trim())
+    .filter((t) => t.length >= MIN_PREFIX_LEN);
+  if (tokens.length === 0) return segments;
+
+  const escaped = tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  // Word-prefix: a Unicode word boundary before the literal, then the literal,
+  // then the rest of the word. `\b`/`\w` are ASCII-only even with `u`, so use
+  // explicit Unicode word-character classes for the boundary and the tail.
+  const re = new RegExp(
+    `(?<![\\p{L}\\p{N}_])(?:${escaped.join("|")})[\\p{L}\\p{N}_]*`,
+    "giu",
+  );
+
+  // Collect match ranges over the whole snippet (segments concatenate to it).
+  const full = segments.map((s) => s.text).join("");
+  const ranges: Array<[number, number]> = [];
+  re.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(full)) !== null) {
+    if (m[0].length === 0) {
+      re.lastIndex++; // guard against zero-width matches
+      continue;
+    }
+    ranges.push([m.index, m.index + m[0].length]);
+  }
+  if (ranges.length === 0) return segments;
+
+  // Walk segments alongside the (sorted, non-overlapping) match ranges, slicing
+  // each segment into plain pieces and keyword pieces. A range may span several
+  // segments, so it's only consumed once it ends within the current segment.
+  const out: Segment[] = [];
+  let segStart = 0; // offset of the current segment within `full`
+  let r = 0; // index of the next range that may touch this segment
+  for (const seg of segments) {
+    const segEnd = segStart + seg.text.length;
+    while (r < ranges.length && ranges[r][1] <= segStart) r++;
+    let cursor = segStart; // absolute position consumed so far
+    // Slice [cursor, abs) of this segment, in segment-local coordinates.
+    const local = (abs: number) => seg.text.slice(cursor - segStart, abs - segStart);
+    let ri = r;
+    while (ri < ranges.length && ranges[ri][0] < segEnd) {
+      const start = Math.max(ranges[ri][0], segStart);
+      const end = Math.min(ranges[ri][1], segEnd);
+      if (start > cursor) out.push({ ...seg, text: local(start) });
+      cursor = start;
+      out.push({ ...seg, text: local(end), keyword: true });
+      cursor = end;
+      if (ranges[ri][1] <= segEnd) ri++;
+      else break; // range continues into the next segment
+    }
+    r = ri;
+    if (cursor < segEnd) out.push({ ...seg, text: local(segEnd) });
+    segStart = segEnd;
+  }
+
+  // A single match split across segments yields adjacent keyword pieces; merge
+  // them so the literal renders as one unbroken box (no seam between, say, the
+  // `text` run and the `:` run).
+  const merged: Segment[] = [];
+  for (const s of out) {
+    const prev = merged[merged.length - 1];
+    if (s.keyword && prev?.keyword) prev.text += s.text;
+    else merged.push(s);
+  }
+  return merged;
+}
+
+/** Background alpha at full saturation. Matches the shared page-highlight ink
+ *  (`--color-page-highlight` in app.css, the txt reader's highlight, and the PDF
+ *  reader's `HL_ALPHA`) so a hit reads the same everywhere. */
+const MAX_ALPHA = 0.42;
 /**
  * Floor alpha for any non-zero contribution. A linear ramp leaves faint spans
  * almost invisible; this guarantees even the weakest real contribution reads.
@@ -329,22 +690,24 @@ const MIN_ALPHA = 0.08;
  * magnitudes up the ramp, so the highlighting reads clearly without being a
  * slight, hard-to-see fade.
  */
-const ALPHA_GAMMA = 0.7;
+const ALPHA_GAMMA = 0.3;
 
 /**
- * Map a normalized signed weight in [-1, 1] to a CSS background color: green for
- * tokens that pushed the similarity up, red for tokens that pulled it down,
- * alpha scaling with magnitude. Returns `"transparent"` for ~zero weight.
+ * Map a normalized positive weight in [0, 1] to a yellow CSS background, alpha
+ * scaling with magnitude. Returns `"transparent"` for zero/negative weight —
+ * only positive contributions are highlighted.
  *
- * The magnitude→alpha mapping is intentionally non-linear: a gamma curve lifts
- * weaker contributions and a floor keeps them visible, ramping color in
- * aggressively so highlights are obvious instead of barely-there.
+ * The yellow (`rgb(255 224 0)`) and peak alpha match the shared page-highlight
+ * ink (`--color-page-highlight` in app.css — the txt reader's highlight — and
+ * the PDF reader's `HL_COLOR`/`HL_ALPHA`) so a hit looks the same in the results
+ * list, the txt reader, and the PDF. The magnitude→alpha mapping is
+ * intentionally non-linear: a gamma curve lifts weaker contributions and a floor
+ * keeps them visible, ramping color in aggressively so highlights aren't
+ * barely-there.
  */
 export function colorFor(weight: number): string {
-  if (!weight) return "transparent";
-  const mag = Math.pow(Math.min(Math.abs(weight), 1), ALPHA_GAMMA);
+  if (weight <= 0) return "transparent";
+  const mag = Math.pow(Math.min(weight, 1), ALPHA_GAMMA);
   const alpha = (MIN_ALPHA + mag * (MAX_ALPHA - MIN_ALPHA)).toFixed(3);
-  return weight > 0
-    ? `hsl(145 72% 42% / ${alpha})`
-    : `hsl(5 78% 51% / ${alpha})`;
+  return `rgb(255 224 0 / ${alpha})`;
 }

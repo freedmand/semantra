@@ -32,3 +32,33 @@ fn bundled_model_reproduces_oracle() {
         "oracle drifted: got {sim:.4}, want 0.6857"
     );
 }
+
+// Smoke test for the multi-task model we also bundle (`mdbr-leaf-mt`, the current
+// active model): it loads, emits 1024-d unit-norm vectors, and ranks an on-topic
+// doc above an off-topic one for the same query. The model card doesn't pin a
+// similarity value for this pair, so we assert shape + ordering rather than an
+// oracle constant.
+#[test]
+fn bundled_mt_model_is_1024d_and_ranks_sanely() {
+    let model_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/mdbr-leaf-mt");
+    let ctx = setup_model(&model_dir).expect("load bundled mt model files");
+
+    let query = format!("{QUERY_PREFIX}What is machine learning?");
+    let on_topic =
+        "Machine learning is a subset of artificial intelligence that learns from data."
+            .to_string();
+    let off_topic = "The central bank raised interest rates to curb rising inflation.".to_string();
+
+    let q = embed_sentences(&ctx, &[query]).expect("embed query");
+    let d = embed_sentences(&ctx, &[on_topic, off_topic]).expect("embed docs");
+
+    assert_eq!(q.dim, 1024, "mt embedding must be 1024-d");
+
+    let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+    let on = cos(&q.rows[0], &d.rows[0]);
+    let off = cos(&q.rows[0], &d.rows[1]);
+    assert!(on > off, "on-topic {on:.4} should outrank off-topic {off:.4}");
+
+    let norm: f32 = q.rows[0].iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!((norm - 1.0).abs() < 1e-3, "query vector not unit-norm: {norm}");
+}

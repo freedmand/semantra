@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use catalog::{Catalog, FileRecord, Job, JOB_PENDING};
-use chunk::{Chunk, Chunker, WordWindowChunker};
+use chunk::{CellChunker, Chunk, Chunker, WordWindowChunker};
 use embed::{embed_chunks_with_vectors, EmbedProgress, BATCH_SIZE};
 use leaf_ir_candle_test::{
     embed_sentences, explain_similarity_batch, setup_model, warmup, ModelCtx, QUERY_PREFIX,
@@ -76,20 +76,35 @@ struct AppPaths {
 // Vectors buffered to this many rows before a single LanceDB append.
 const INSERT_BATCH: usize = 1024;
 
-/// Words per chunk for background indexing (matches the prior `index_file`
-/// default). The overlap is derived from it.
-const DEFAULT_CHUNK_SIZE: usize = 70;
-
-/// Identifies the chunking + embedding approach that produced a file's chunks.
-/// Stored per file/chunk so a future change can detect & re-index stale data.
-/// Bump when the model, chunker, or its defaults change.
-pub const PIPELINE_VERSION: &str = "v1:mdbr-leaf-ir:wordwindow";
+/// Words per chunk for background indexing, and the rewind/overlap shared
+/// between consecutive windows. Both are baked into [`pipeline_version`], so
+/// changing either auto-invalidates on-disk vectors and triggers re-indexing.
+const DEFAULT_CHUNK_SIZE: usize = 50;
+const DEFAULT_CHUNK_OVERLAP: usize = 10;
 
 /// Which embedding model to load. The model files live under
-/// `models/<MODEL_NAME>/` (bundled as a resource and in the dev tree).
+/// `models/<MODEL_NAME>/` (bundled as a resource and in the dev tree). This is
+/// the single switch for the active model: flipping it loads the new weights,
+/// changes [`pipeline_version`] (so the DB detects the change and re-indexes on
+/// next startup), and — because `tauri.conf.json` bundles all of `models/**` —
+/// needs no other edit. The store sizes itself to the model's embedding dim.
 ///
-/// Known good values: `"mdbr-leaf-ir"` (retrieval), `"mdbr-leaf-mt"` (multi-task).
-pub const MODEL_NAME: &str = "mdbr-leaf-ir";
+/// Known good values: `"mdbr-leaf-ir"` (768-d retrieval), `"mdbr-leaf-mt"`
+/// (1024-d multi-task).
+pub const MODEL_NAME: &str = "mdbr-leaf-mt";
+
+/// Identifies the chunking + embedding approach that produced a file's chunks,
+/// stored per file/chunk so a change can be detected and stale data re-indexed.
+/// Derived from [`MODEL_NAME`] and the chunk geometry, so switching models OR
+/// changing the chunk size/overlap invalidates old vectors automatically. Bump
+/// the `v1` schema rev by hand only for changes not already captured here.
+pub fn pipeline_version() -> String {
+    format!("v1:{MODEL_NAME}:wordwindow:{DEFAULT_CHUNK_SIZE}-{DEFAULT_CHUNK_OVERLAP}")
+}
+
+/// `db_meta` key under which the [`pipeline_version`] the on-disk vectors were
+/// built with is stored, so a model/chunker change is detected at startup.
+const DB_MODEL_KEY: &str = "active_pipeline";
 
 /// Resolve the directory that holds the bundled model files (resource dir, then
 /// dev-tree fallback — `tauri dev` does not reliably copy resources).
@@ -191,7 +206,7 @@ async fn run_index_pipeline(
                         char_end: c.char_end as i64,
                         page: c.page.map(|p| p as i64),
                         page_char_start: c.page_char_start as i64,
-                        pipeline_version: PIPELINE_VERSION.to_string(),
+                        pipeline_version: pipeline_version(),
                         vector,
                     });
                 }
@@ -221,6 +236,10 @@ async fn run_index_pipeline(
         let mut guard = store.lock().await;
         guard.maybe_build_ann().await?;
         guard.ensure_fts_index().await?;
+        // Reclaim disk: each per-file (re)index appends fragments and rebuilds
+        // indexes additively, leaving stale versions behind. Compact + prune
+        // collapses them. Safe here because we hold the store guard exclusively.
+        guard.compact().await?;
     }
 
     producer
@@ -626,15 +645,20 @@ async fn process_job(app: &AppHandle, job: &Job) -> Result<(), String> {
         .map_err(|e| format!("extract task panicked: {e}"))??;
 
     let char_len = extracted.full_text.chars().count() as i64;
+    let word_count = extracted.full_text.split_whitespace().count() as i64;
     let filetype = extracted.filetype;
     let page_count = extracted.page_count.map(|p| p as i64);
     let byte_len = std::fs::metadata(&job.copied_path)
         .map(|m| m.len() as i64)
         .unwrap_or(0);
 
-    let overlap = (DEFAULT_CHUNK_SIZE / 8).max(1);
-    let chunker = WordWindowChunker::new(DEFAULT_CHUNK_SIZE, overlap);
-    let chunks = chunker.chunk(&extracted.segments);
+    // CSVs index one chunk per cell (the segments are already cells); everything
+    // else uses fixed word windows.
+    let chunks = match filetype {
+        extract::FileType::Csv => CellChunker.chunk(&extracted.segments),
+        _ => WordWindowChunker::new(DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP)
+            .chunk(&extracted.segments),
+    };
 
     let model = (*app.state::<SharedModel>()).clone();
     let sink = progress_sink((*app).clone(), (*active).clone(), job.clone(), queue_remaining);
@@ -659,7 +683,8 @@ async fn process_job(app: &AppHandle, job: &Job) -> Result<(), String> {
             byte_len,
             page_count,
             char_len,
-            pipeline_version: PIPELINE_VERSION.to_string(),
+            word_count,
+            pipeline_version: pipeline_version(),
             created_at: now_ms(),
         })
         .await?;
@@ -737,6 +762,7 @@ struct DocMeta {
     filetype: String,
     page_count: Option<i64>,
     byte_len: i64,
+    word_count: i64,
 }
 
 /// One search hit enriched for the in-project UI. `index` is the stable chunk id
@@ -784,6 +810,7 @@ async fn list_documents(
             filetype: f.filetype,
             page_count: f.page_count,
             byte_len: f.byte_len,
+            word_count: f.word_count,
         })
         .collect())
 }
@@ -821,6 +848,25 @@ async fn get_pdf_src(catalog: State<'_, SharedCatalog>, sha512: String) -> Resul
         .await?
         .ok_or_else(|| format!("unknown file {sha512}"))?;
     Ok(file.copied_path)
+}
+
+/// Parsed grid (header row + data rows, all cells verbatim) of a CSV document,
+/// for the canvas-grid reader. Re-parsed on demand from the copied file — the
+/// same parser the indexer used, so rows/columns line up with chunk (row, col).
+#[tauri::command]
+async fn get_csv_data(
+    catalog: State<'_, SharedCatalog>,
+    sha512: String,
+) -> Result<extract::CsvGrid, String> {
+    let file = catalog
+        .lock()
+        .await
+        .get_file(&sha512)
+        .await?
+        .ok_or_else(|| format!("unknown file {sha512}"))?;
+    tauri::async_runtime::spawn_blocking(move || extract::read_csv_grid(&file.copied_path))
+        .await
+        .map_err(|e| format!("csv task panicked: {e}"))?
 }
 
 /// Compute highlight rectangles for a chunk's span on one PDF page, from PDFium's
@@ -967,12 +1013,35 @@ async fn search_project(
     inputs.extend(prefs.iter().map(|p| (p.text.clone(), p.weight)));
     let centroid = build_centroid(Arc::clone(model.inner()), inputs).await?;
 
-    // Candidate set from quoted literals: intersection of each literal's FTS hits.
+    // Candidate set from quoted literals: chunks where each literal matches as a
+    // word *prefix* (so `"green"` matches "greenhouse"). The store's substring
+    // scan returns a coarse superset (any occurrence of the text); we narrow it
+    // here — the "post-logic in the handler" — to word-prefix matches via
+    // `query::text_matches_literal_prefix`. Literals are ANDed (intersection).
     const FTS_FETCH: usize = 4096;
     let mut candidate: Option<std::collections::HashSet<i64>> = None;
+    // Keep the matched hits (id → row) so the literals-only branch can rank the
+    // prefix-only candidates the BM25 word index can't see, without re-querying.
+    let mut candidate_hits: std::collections::HashMap<i64, store::Hit> =
+        std::collections::HashMap::new();
     for lit in &literals {
-        let hits = store.lock().await.fts_search(lit, FTS_FETCH, &shas).await?;
-        let ids: std::collections::HashSet<i64> = hits.iter().map(|h| h.id).collect();
+        // Tokens below the trigram floor can't be matched by the index; a literal
+        // with none imposes no constraint (no-op), matching the highlight side.
+        let tokens = query::literal_prefix_tokens(lit);
+        if tokens.is_empty() {
+            continue;
+        }
+        let hits = store.lock().await.substring_search(&tokens, FTS_FETCH, &shas).await?;
+        let ids: std::collections::HashSet<i64> = hits
+            .iter()
+            .filter(|h| query::text_matches_literal_prefix(&h.text, lit))
+            .map(|h| h.id)
+            .collect();
+        for h in hits {
+            if ids.contains(&h.id) {
+                candidate_hits.entry(h.id).or_insert(h);
+            }
+        }
         candidate = Some(match candidate {
             None => ids,
             Some(prev) => prev.intersection(&ids).copied().collect(),
@@ -993,16 +1062,17 @@ async fn search_project(
             hits.truncate(limit);
             hits
         }
-        // Literals only: rank by BM25 of the first literal, filtered to the set.
+        // Literals only: rank the prefix-confirmed candidates by their
+        // trigram-overlap score (already gathered by `substring_search` into
+        // `candidate_hits`) — no separate ranking query needed.
         (None, Some(cand)) => {
-            let mut hits = store
-                .lock()
-                .await
-                .fts_search(literals.first().map(|s| s.as_str()).unwrap_or(""), FTS_FETCH, &shas)
-                .await?;
-            hits.retain(|h| cand.contains(&h.id));
-            hits.truncate(limit);
-            hits
+            let mut out: Vec<store::Hit> = cand
+                .iter()
+                .filter_map(|id| candidate_hits.get(id).cloned())
+                .collect();
+            out.sort_by(|a, b| b.score.total_cmp(&a.score));
+            out.truncate(limit);
+            out
         }
         // Nothing to search.
         (None, None) => Vec::new(),
@@ -1070,8 +1140,30 @@ pub fn run() {
                     .execute()
                     .await
                     .map_err(|e| format!("connect lancedb: {e}"))?;
-                let store = VectorStore::open(conn.clone(), embedding_dim).await?;
-                let catalog = Catalog::open(conn).await?;
+                let catalog = Catalog::open(conn.clone()).await?;
+
+                // If the active embedding model (or chunker) changed since this DB
+                // was last written, every stored vector is from a different model —
+                // and likely a different dimension — so it can't be queried as-is.
+                // Re-enqueue every file for indexing and drop the stale vectors;
+                // querying any project then requires the new model's re-index to
+                // finish. `pipeline_version()` is derived from MODEL_NAME, so this
+                // triggers automatically the first time the app runs after a switch.
+                let active = pipeline_version();
+                let stored = catalog.get_meta(DB_MODEL_KEY).await?;
+                if stored.as_deref() != Some(active.as_str()) {
+                    let n = catalog.requeue_all_for_reindex(now_ms()).await?;
+                    store::drop_chunks(&conn).await?;
+                    catalog.set_meta(DB_MODEL_KEY, &active).await?;
+                    if stored.is_some() {
+                        eprintln!(
+                            "[semantra] embedding pipeline changed to {active}; \
+                             re-indexing {n} file reference(s)"
+                        );
+                    }
+                }
+
+                let store = VectorStore::open(conn, embedding_dim).await?;
                 Ok::<_, String>((store, catalog))
             })?;
             app.manage(SharedStore::new(store));
@@ -1113,6 +1205,7 @@ pub fn run() {
             list_documents,
             get_document_text,
             get_pdf_src,
+            get_csv_data,
             get_highlight_rects,
             search_project
         ])

@@ -21,7 +21,12 @@ pub struct Segment {
     /// The segment's verbatim text.
     pub text: String,
     /// 0-based page index when the source paginates (PDF); `None` for flat text.
+    /// For a CSV cell (see [`CellChunker`]) this carries the 0-based data-row
+    /// index instead — the reader navigates by (row, col), not by page.
     pub page: Option<usize>,
+    /// 0-based column index when the source is tabular (CSV); `None` otherwise.
+    /// Only [`CellChunker`] reads it; [`WordWindowChunker`] ignores it.
+    pub col: Option<usize>,
     /// Char offset of this segment's first char within the canonical full text.
     pub base_offset: usize,
 }
@@ -32,6 +37,7 @@ impl Segment {
         Segment {
             text: text.into(),
             page: None,
+            col: None,
             base_offset: 0,
         }
     }
@@ -46,15 +52,20 @@ impl Segment {
 /// onto per-page PDFium character boxes for the PDF reader).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chunk {
-    /// Whitespace-normalized text of the window (what gets embedded & displayed).
+    /// Verbatim text of the window (what gets embedded & displayed). Equals the
+    /// canonical full-text slice `[char_start, char_end)` — interior whitespace
+    /// is preserved, never normalized.
     pub text: String,
     /// Inclusive char offset of the window's first char in the full text.
     pub char_start: usize,
     /// Exclusive char offset of the window's last char in the full text.
     pub char_end: usize,
-    /// Page the chunk came from, if any.
+    /// Page the chunk came from, if any. For CSV ([`CellChunker`]) this is the
+    /// 0-based data-row index instead.
     pub page: Option<usize>,
-    /// Char offset of `char_start` relative to its segment/page start.
+    /// Char offset of `char_start` relative to its segment/page start. For CSV
+    /// ([`CellChunker`]) this carries the 0-based column index instead — the CSV
+    /// reader navigates to a cell by (page=row, page_char_start=col).
     pub page_char_start: usize,
 }
 
@@ -157,12 +168,12 @@ impl Chunker for WordWindowChunker {
                 let end = (start + self.size).min(n);
                 let first = &words[start];
                 let last = &words[end - 1];
-                // Verbatim slice → whitespace-normalized join for embedding/display.
-                let text = words[start..end]
-                    .iter()
-                    .map(|w| &seg.text[w.byte_start..w.byte_end])
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                // Verbatim slice from the first word's start to the last word's
+                // end: interior whitespace (tabs, newlines, runs of spaces) is
+                // preserved, so `text` is exactly char_slice(full_text,
+                // char_start, char_end). Leading/trailing whitespace outside the
+                // window is excluded because the window is bounded by words.
+                let text = seg.text[first.byte_start..last.byte_end].to_string();
                 out.push(Chunk {
                     text,
                     char_start: seg.base_offset + first.char_start,
@@ -177,6 +188,31 @@ impl Chunker for WordWindowChunker {
             }
         }
         out
+    }
+}
+
+/// One chunk per segment, verbatim and unwindowed — for sources whose segments
+/// are already the indexing unit. A CSV maps each cell to a segment, so this
+/// turns every cell into exactly one [`Chunk`] (the requirement to "index every
+/// field"). The chunk's span covers the whole segment, and `page`/`page_char_start`
+/// pass through the segment's `page` (row) and `col` (column) so the grid reader
+/// can navigate to the exact cell. Empty segments are dropped (nothing to embed).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CellChunker;
+
+impl Chunker for CellChunker {
+    fn chunk(&self, segments: &[Segment]) -> Vec<Chunk> {
+        segments
+            .iter()
+            .filter(|s| !s.text.is_empty())
+            .map(|s| Chunk {
+                char_start: s.base_offset,
+                char_end: s.base_offset + s.text.chars().count(),
+                text: s.text.clone(),
+                page: s.page,
+                page_char_start: s.col.unwrap_or(0),
+            })
+            .collect()
     }
 }
 
@@ -223,12 +259,14 @@ mod tests {
         let p0 = Segment {
             text: "one two three".into(),
             page: Some(0),
+            col: None,
             base_offset: 0,
         };
         // Page 1 starts after page 0's text plus a one-char separator.
         let p1 = Segment {
             text: "four five".into(),
             page: Some(1),
+            col: None,
             base_offset: 14,
         };
         let chunks = WordWindowChunker::new(10, 0).chunk(&[p0, p1]);
@@ -244,12 +282,15 @@ mod tests {
     }
 
     #[test]
-    fn handles_unicode_and_irregular_whitespace() {
+    fn preserves_interior_whitespace_verbatim() {
         let text = "café\tnaïve\n\n  Σigma";
         let chunks = WordWindowChunker::new(2, 0).chunk(&[Segment::flat(text)]);
-        assert_eq!(chunks[0].text, "café naïve");
+        // Interior whitespace between words is kept exactly (the tab survives);
+        // the run before the next window's first word is excluded.
+        assert_eq!(chunks[0].text, "café\tnaïve");
         assert_eq!(chunks[1].text, "Σigma");
-        // Offsets are char-based: the second window starts at "Σ".
+        // chunk.text is exactly the canonical full-text slice it points at.
+        assert_eq!(chunks[0].text, char_slice(text, chunks[0].char_start, chunks[0].char_end));
         assert_eq!(char_slice(text, chunks[1].char_start, chunks[1].char_end), "Σigma");
     }
 
@@ -259,6 +300,45 @@ mod tests {
         assert!(WordWindowChunker::default()
             .chunk(&[Segment::flat("   \n\t ")])
             .is_empty());
+    }
+
+    fn cell(text: &str, page: usize, col: usize, base_offset: usize) -> Segment {
+        Segment {
+            text: text.into(),
+            page: Some(page),
+            col: Some(col),
+            base_offset,
+        }
+    }
+
+    #[test]
+    fn cell_chunker_emits_one_verbatim_chunk_per_cell() {
+        // base_offset mirrors a full text of composed strings joined by '\n':
+        // "city: Paris" (11 chars) + '\n' => row 1 cell starts at 12.
+        let segs = vec![cell("city: Paris", 0, 0, 0), cell("country: France", 0, 1, 12)];
+        let chunks = CellChunker.chunk(&segs);
+        assert_eq!(chunks.len(), 2);
+        // Verbatim text, and page/page_char_start carry (row, col).
+        assert_eq!(chunks[0].text, "city: Paris");
+        assert_eq!(chunks[0].page, Some(0)); // row
+        assert_eq!(chunks[0].page_char_start, 0); // col
+        assert_eq!((chunks[0].char_start, chunks[0].char_end), (0, 11));
+        assert_eq!(chunks[1].page, Some(0));
+        assert_eq!(chunks[1].page_char_start, 1);
+        assert_eq!(chunks[1].char_start, 12);
+        assert_eq!(chunks[1].char_end, 12 + "country: France".chars().count());
+    }
+
+    #[test]
+    fn cell_chunker_preserves_interior_whitespace_and_skips_empty() {
+        let segs = vec![
+            cell("", 0, 0, 0),                  // empty value cell → dropped
+            cell("notes: line1\nline2", 0, 1, 0), // newline inside the value survives
+        ];
+        let chunks = CellChunker.chunk(&segs);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "notes: line1\nline2");
+        assert_eq!(chunks[0].page_char_start, 1);
     }
 
     #[test]

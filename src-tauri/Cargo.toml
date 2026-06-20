@@ -50,6 +50,12 @@ serde_json = "1"
 chardetng = "0.1"
 encoding_rs = "0.8"
 
+# RFC 4180 CSV parsing for the `.csv` extractor. Correctly handles quoted fields
+# with embedded commas, quotes, and newlines, which a naive line/split would
+# mangle — important since each field becomes its own embedded chunk and cell
+# values are stored verbatim.
+csv = "1"
+
 # PDFium binding for PDF text extraction. `default-features = false` drops the
 # `image_latest` feature (and the heavy `image` crate) — we only pull text, never
 # render. We do NOT enable `static`, so the crate binds *dynamically* via

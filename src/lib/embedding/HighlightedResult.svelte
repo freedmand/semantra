@@ -29,9 +29,7 @@
 
 <span class="text"
   >{#if segments}{#each segments as seg}{#if seg.weight}<mark
-          style:background-color={colorFor(seg.weight)}
-          title={`contribution ${seg.score >= 0 ? "+" : ""}${seg.score.toFixed(4)}`}
-          >{seg.text}</mark
+          style:background-color={colorFor(seg.weight)}>{seg.text}</mark
         >{:else}{seg.text}{/if}{/each}{:else}{text}{/if}</span
 >
 

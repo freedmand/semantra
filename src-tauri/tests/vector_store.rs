@@ -3,7 +3,8 @@
 //! These use **synthetic** unit-norm vectors (no embedding model) so they are
 //! fast and deterministic, and they double as the proof that LanceDB builds and
 //! links cleanly on this target. They exercise file-scoped insertion + search,
-//! the IVF-HNSW-SQ ANN index, the BM25 full-text index, and per-file deletion.
+//! the IVF-HNSW-SQ ANN index, the n-gram (substring) full-text index, and
+//! per-file deletion.
 //!
 //! Run with: cargo test --release
 
@@ -121,7 +122,7 @@ async fn ann_index_builds_and_recalls() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn full_text_search_matches_keyword() {
+async fn substring_search_matches_keyword() {
     let (mut store, _t) = temp_store().await;
     store
         .insert(&[
@@ -133,7 +134,12 @@ async fn full_text_search_matches_keyword() {
         .unwrap();
     store.ensure_fts_index().await.unwrap();
 
-    let hits = store.fts_search("brown", 10, &[FILE.into()]).await.unwrap();
+    // Trigram substring search over the n-gram FTS index: "brown" matches both
+    // rows that contain it as a substring, not the dog row.
+    let hits = store
+        .substring_search(&["brown".into()], 10, &[FILE.into()])
+        .await
+        .unwrap();
     let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
     assert!(texts.iter().all(|t| t.contains("brown")), "got {texts:?}");
     assert_eq!(hits.len(), 2);

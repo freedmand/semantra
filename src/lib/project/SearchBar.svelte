@@ -1,26 +1,10 @@
 <script lang="ts">
-  // Query input + relevance-feedback preference chips. Flags the query as
-  // "outdated" (dashed yellow) when it has changed since the last search.
-  import type { ProjectHit } from "./projectClient";
+  // Query input + relevance-feedback preference chips. Reads/writes the central
+  // search state directly. Flags the query as "outdated" (dashed yellow) when it
+  // has changed since the last search — that staleness tracking is local UI.
+  import { appState, runSearch, setPreference } from "$lib/state.svelte";
 
-  let {
-    value = $bindable(""),
-    preferences,
-    onSearch,
-    onClearPreference,
-    onSetPreference,
-  }: {
-    value?: string;
-    preferences: Record<number, { hit: ProjectHit; weight: number }>;
-    onSearch: (query: string) => void;
-    onClearPreference: (hit: ProjectHit) => void;
-    onSetPreference: (hit: ProjectHit, weight: number) => void;
-  } = $props();
-
-  // Active (non-zero) preferences, as chips.
-  const prefList = $derived(
-    Object.values(preferences).filter((p) => p.weight !== 0),
-  );
+  const search = appState.search;
 
   // A chip's strength is the magnitude of its signed weight; the sign carries
   // the +/- direction. Clamp to the input's 0.1–2.0 range.
@@ -32,12 +16,15 @@
   // Track the (query, preferences) state at the last search to show staleness.
   let lastKey = $state("");
   const searchKey = $derived(
-    JSON.stringify({ value, prefs: prefList.map((p) => [p.hit.index, p.weight]) }),
+    JSON.stringify({
+      value: search.query,
+      prefs: appState.prefList.map((p) => [p.hit.index, p.weight]),
+    }),
   );
   const outdated = $derived(searchKey !== lastKey);
 
   function doSearch() {
-    onSearch(value);
+    runSearch(search.query);
     lastKey = searchKey;
   }
 </script>
@@ -49,7 +36,11 @@
       class:outdated
       style="color:#0f0f0f; border-color: var(--color-border);"
       placeholder="Search"
-      bind:value
+      autocorrect="off"
+      autocapitalize="off"
+      autocomplete="off"
+      spellcheck="false"
+      bind:value={search.query}
       onkeydown={(e) => {
         if (e.key === "Enter") doSearch();
       }}
@@ -57,9 +48,9 @@
     <button class="search-button" onclick={doSearch} aria-label="Search">Search</button>
   </div>
 
-  {#if prefList.length}
+  {#if appState.prefList.length}
     <div class="max-h-24 overflow-y-auto mt-2 flex flex-wrap gap-2">
-      {#each prefList as pref (pref.hit.index)}
+      {#each appState.prefList as pref (pref.hit.index)}
         <div
           class="flex items-center font-mono rounded-sm text-sm max-w-72"
           style={pref.weight > 0 ? "background:#bfdbfe;" : "background:#fed7aa;"}
@@ -67,7 +58,7 @@
           <button
             class="max-w-48 truncate px-2 py-0.5"
             title={`${pref.hit.basename}: ${pref.hit.text} (click to remove)`}
-            onclick={() => onClearPreference(pref.hit)}
+            onclick={() => setPreference(pref.hit, 0)}
           >
             <span
               class="font-bold mr-1"
@@ -87,7 +78,7 @@
             onclick={(e) => e.stopPropagation()}
             onchange={(e) => {
               const v = clampMultiple((e.currentTarget as HTMLInputElement).valueAsNumber);
-              onSetPreference(pref.hit, Math.sign(pref.weight) * v);
+              setPreference(pref.hit, Math.sign(pref.weight) * v);
             }}
           />
         </div>

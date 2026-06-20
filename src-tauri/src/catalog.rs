@@ -29,6 +29,9 @@ const PROJECTS: &str = "projects";
 const FILES: &str = "files";
 const PROJECT_FILES: &str = "project_files";
 const INDEX_JOBS: &str = "index_jobs";
+/// Tiny key/value table for DB-wide state (e.g. the embedding pipeline the stored
+/// vectors were built with, so a model change is detected on startup).
+const DB_META: &str = "db_meta";
 
 /// Job status values stored in the `index_jobs` table.
 pub const JOB_PENDING: &str = "pending";
@@ -47,6 +50,7 @@ pub struct FileRecord {
     /// Page count for paginated files; `None` for flat text.
     pub page_count: Option<i64>,
     pub char_len: i64,
+    pub word_count: i64,
     pub pipeline_version: String,
     pub created_at: i64,
 }
@@ -86,6 +90,7 @@ pub struct Catalog {
     files: Table,
     project_files: Table,
     index_jobs: Table,
+    db_meta: Table,
 }
 
 impl Catalog {
@@ -102,6 +107,7 @@ impl Catalog {
         let project_files =
             ensure_table(&conn, &existing, PROJECT_FILES, project_files_schema()).await?;
         let index_jobs = ensure_table(&conn, &existing, INDEX_JOBS, index_jobs_schema()).await?;
+        let db_meta = ensure_table(&conn, &existing, DB_META, db_meta_schema()).await?;
 
         Ok(Self {
             conn,
@@ -109,7 +115,79 @@ impl Catalog {
             files,
             project_files,
             index_jobs,
+            db_meta,
         })
+    }
+
+    // --- DB-wide metadata + model-change re-index -------------------------
+
+    /// Read a `db_meta` value by key (`None` if unset).
+    pub async fn get_meta(&self, key: &str) -> Result<Option<String>, String> {
+        let batches = self.scan(&self.db_meta, Some(format!("key = '{key}'"))).await?;
+        Ok(column_strings(&batches, "value").into_iter().next())
+    }
+
+    /// Upsert a single `db_meta` key/value row (delete-then-append, so one row
+    /// per key).
+    pub async fn set_meta(&self, key: &str, value: &str) -> Result<(), String> {
+        self.db_meta
+            .delete(&format!("key = '{key}'"))
+            .await
+            .map_err(|e| format!("delete meta {key}: {e}"))?;
+        let batch =
+            string_int_batch(db_meta_schema(), &[("key", key), ("value", value)], &[])?;
+        append(&self.db_meta, batch).await
+    }
+
+    /// Re-enqueue every project→file membership for indexing and drop the
+    /// committed `files` rows, so the background worker re-embeds each file under
+    /// the now-active model. Called once when the active pipeline changes.
+    ///
+    /// Copied bytes are kept (content-addressed, model-independent), so re-indexing
+    /// never needs the user's original path. Dropping the `files` rows is what
+    /// forces a real re-embed: the worker's `process_job` short-circuits a file
+    /// whose row already exists. Idempotent per `(project, file)` via
+    /// [`enqueue_job`](Self::enqueue_job). Returns the number of jobs enqueued.
+    pub async fn requeue_all_for_reindex(&self, now: i64) -> Result<usize, String> {
+        // Committed files keyed by sha, for the copied_path/basename/ext each job
+        // needs. If there are none, there's nothing to re-index.
+        let files = read_file_records(&self.scan(&self.files, None).await?);
+        if files.is_empty() {
+            return Ok(0);
+        }
+        let by_sha: std::collections::HashMap<String, FileRecord> =
+            files.into_iter().map(|f| (f.sha512.clone(), f)).collect();
+
+        // Every membership becomes a pending job (only for files we still have a
+        // committed row for — uncommitted ones already have their own job).
+        let memberships = self.scan(&self.project_files, None).await?;
+        let pids = column_strings(&memberships, "project_id");
+        let shas = column_strings(&memberships, "sha512");
+        let srcs = column_strings(&memberships, "source_path");
+        let mut enqueued = 0;
+        for ((project_id, sha512), source_path) in pids.iter().zip(&shas).zip(&srcs) {
+            let Some(f) = by_sha.get(sha512) else { continue };
+            self.enqueue_job(&Job {
+                project_id: project_id.clone(),
+                sha512: sha512.clone(),
+                source_path: source_path.clone(),
+                copied_path: f.copied_path.clone(),
+                basename: f.basename.clone(),
+                ext: f.ext.clone(),
+                status: JOB_PENDING.to_string(),
+                error: String::new(),
+                added_at: now,
+            })
+            .await?;
+            enqueued += 1;
+        }
+
+        // Drop the committed file rows so the worker actually re-embeds them.
+        self.files
+            .delete("1 = 1")
+            .await
+            .map_err(|e| format!("clear files for re-index: {e}"))?;
+        Ok(enqueued)
     }
 
     /// Create the project row if it does not already exist.
@@ -422,6 +500,7 @@ fn files_schema() -> SchemaRef {
         Field::new("byte_len", DataType::Int64, false),
         Field::new("page_count", DataType::Int64, true),
         Field::new("char_len", DataType::Int64, false),
+        Field::new("word_count", DataType::Int64, false),
         Field::new("pipeline_version", DataType::Utf8, false),
         Field::new("created_at", DataType::Int64, false),
     ]))
@@ -433,6 +512,13 @@ fn project_files_schema() -> SchemaRef {
         Field::new("sha512", DataType::Utf8, false),
         Field::new("source_path", DataType::Utf8, false),
         Field::new("added_at", DataType::Int64, false),
+    ]))
+}
+
+fn db_meta_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Utf8, false),
+        Field::new("value", DataType::Utf8, false),
     ]))
 }
 
@@ -518,6 +604,7 @@ fn build_file_batch(f: &FileRecord) -> Result<RecordBatch, String> {
         Arc::new(Int64Array::from(vec![f.byte_len])),
         Arc::new(page_count),
         Arc::new(Int64Array::from(vec![f.char_len])),
+        Arc::new(Int64Array::from(vec![f.word_count])),
         Arc::new(StringArray::from(vec![f.pipeline_version.as_str()])),
         Arc::new(Int64Array::from(vec![f.created_at])),
     ];
@@ -638,9 +725,13 @@ fn read_file_records(batches: &[RecordBatch]) -> Vec<FileRecord> {
         ) else {
             continue;
         };
-        let (Some(byte_len), Some(page_count), Some(char_len), Some(created)) =
-            (n("byte_len"), n("page_count"), n("char_len"), n("created_at"))
-        else {
+        let (Some(byte_len), Some(page_count), Some(char_len), Some(word_count), Some(created)) = (
+            n("byte_len"),
+            n("page_count"),
+            n("char_len"),
+            n("word_count"),
+            n("created_at"),
+        ) else {
             continue;
         };
         for i in 0..b.num_rows() {
@@ -657,6 +748,7 @@ fn read_file_records(batches: &[RecordBatch]) -> Vec<FileRecord> {
                     Some(page_count.value(i))
                 },
                 char_len: char_len.value(i),
+                word_count: word_count.value(i),
                 pipeline_version: pv.value(i).to_string(),
                 created_at: created.value(i),
             });
@@ -688,6 +780,7 @@ mod tests {
             byte_len: 1234,
             page_count: Some(3),
             char_len: 999,
+            word_count: 150,
             pipeline_version: "v1".into(),
             created_at: 100,
         }
@@ -806,6 +899,52 @@ mod tests {
         cat.delete_job("p1", "b").await.unwrap();
         assert_eq!(cat.job_counts("p1").await.unwrap(), (0, 0));
         assert!(cat.next_pending_job().await.unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn db_meta_round_trips_and_upserts() {
+        let (cat, _t) = temp_catalog().await;
+        assert!(cat.get_meta("active_pipeline").await.unwrap().is_none());
+        cat.set_meta("active_pipeline", "v1:mdbr-leaf-ir:wordwindow").await.unwrap();
+        assert_eq!(
+            cat.get_meta("active_pipeline").await.unwrap().as_deref(),
+            Some("v1:mdbr-leaf-ir:wordwindow")
+        );
+        // Upsert replaces (one row per key).
+        cat.set_meta("active_pipeline", "v1:mdbr-leaf-mt:wordwindow").await.unwrap();
+        assert_eq!(
+            cat.get_meta("active_pipeline").await.unwrap().as_deref(),
+            Some("v1:mdbr-leaf-mt:wordwindow")
+        );
+        let batches = cat.scan(&cat.db_meta, None).await.unwrap();
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 1, "upsert must keep exactly one row per key");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requeue_all_for_reindex_uncommits_and_enqueues() {
+        let (cat, _t) = temp_catalog().await;
+        // Two projects share a file; a second file is solo. Both are committed.
+        cat.insert_file(&sample_file("shared")).await.unwrap();
+        cat.insert_file(&sample_file("solo")).await.unwrap();
+        cat.add_file_ref("p1", "shared", "/orig/shared.pdf", 1).await.unwrap();
+        cat.add_file_ref("p2", "shared", "/elsewhere/shared.pdf", 1).await.unwrap();
+        cat.add_file_ref("p1", "solo", "/orig/solo.pdf", 1).await.unwrap();
+
+        // One job per membership (3), and the committed file rows are dropped.
+        let n = cat.requeue_all_for_reindex(99).await.unwrap();
+        assert_eq!(n, 3);
+        assert!(cat.get_file("shared").await.unwrap().is_none());
+        assert!(cat.get_file("solo").await.unwrap().is_none());
+        assert_eq!(cat.job_counts("p1").await.unwrap(), (2, 0));
+        assert_eq!(cat.job_counts("p2").await.unwrap(), (1, 0));
+        // The enqueued job carries the file's copied bytes path (re-index needs no original).
+        let job = cat.next_pending_job().await.unwrap().unwrap();
+        assert_eq!(job.copied_path, format!("/files/{}.pdf", job.sha512));
+
+        // No committed files → nothing to do.
+        let (cat2, _t2) = temp_catalog().await;
+        assert_eq!(cat2.requeue_all_for_reindex(1).await.unwrap(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

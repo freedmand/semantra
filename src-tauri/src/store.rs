@@ -24,10 +24,14 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures::TryStreamExt;
-use lancedb::index::scalar::{FtsIndexBuilder, FullTextSearchQuery};
+use lancedb::index::scalar::{
+    BooleanQuery, FtsIndexBuilder, FtsQuery, FullTextSearchQuery, MatchQuery, Occur, Operator,
+};
 use lancedb::index::vector::IvfHnswSqIndexBuilder;
 use lancedb::index::Index;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::table::optimize::Duration;
+use lancedb::table::{CompactionOptions, OptimizeAction};
 use lancedb::{Connection, DistanceType, Table};
 
 /// Below this row count an ANN index is pointless — brute-force over a few
@@ -36,6 +40,16 @@ use lancedb::{Connection, DistanceType, Table};
 const MIN_ANN_ROWS: usize = 256;
 
 const TABLE_NAME: &str = "chunks";
+
+/// N-gram length for the substring (keyword-prefix) FTS index. The `text` column
+/// is tokenized into trigrams so `full_text_search` can match *within* words
+/// (`green` inside `greenhouse`) via the inverted index instead of a linear
+/// `contains` scan — the difference that lets keyword filtering scale to large
+/// corpora. Trigrams (3) are the standard selectivity sweet spot: bigrams are
+/// far less selective (huge postings) and longer grams miss short queries.
+/// Quoted-keyword tokens shorter than this can't be tokenized, so they're
+/// dropped upstream (see `query::MIN_PREFIX_LEN`, kept equal to this).
+const NGRAM_LEN: u32 = 3;
 
 /// How a dense query should be answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,17 +269,29 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Ensure a BM25 full-text index exists on `text`. Safe to call repeatedly;
-    /// rebuilding refreshes it to include newly inserted rows.
+    /// Ensure the trigram full-text index exists on `text`. Safe to call
+    /// repeatedly; `create_index` replaces, so rebuilding both refreshes the
+    /// index with newly inserted rows and (re)applies the tokenizer config.
+    ///
+    /// The index uses an **n-gram tokenizer** (not the default word tokenizer)
+    /// so `full_text_search` does substring matching — see [`NGRAM_LEN`]. This
+    /// trades word-level BM25 ranking for substring capability + scale; keyword
+    /// results rank by trigram-overlap BM25 instead. `lower_case` makes matching
+    /// case-insensitive (the same analyzer lowercases the query side too).
     pub async fn ensure_fts_index(&mut self) -> Result<(), String> {
         let Some(table) = &self.table else {
             return Ok(());
         };
+        let params = FtsIndexBuilder::default()
+            .base_tokenizer("ngram".to_string())
+            .ngram_min_length(NGRAM_LEN)
+            .ngram_max_length(NGRAM_LEN)
+            .lower_case(true);
         table
-            .create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
+            .create_index(&["text"], Index::FTS(params))
             .execute()
             .await
-            .map_err(|e| format!("build FTS index: {e}"))?;
+            .map_err(|e| format!("build n-gram FTS index: {e}"))?;
         self.fts_built = true;
         Ok(())
     }
@@ -309,10 +335,25 @@ impl VectorStore {
         Ok(hits)
     }
 
-    /// BM25 full-text search for `term`, restricted to `sha_filter` files.
-    pub async fn fts_search(
+    /// Substring candidate search backing the quoted-keyword *prefix* filter.
+    /// Returns rows whose `text` contains every `token` as a substring (case-
+    /// insensitive), restricted to `sha_filter`, scored by trigram-overlap BM25
+    /// (higher = better). This is a coarse superset — *substring*, not prefix —
+    /// which the handler in `lib.rs` narrows to word-prefix matches.
+    ///
+    /// Accelerated by the n-gram FTS index ([`ensure_fts_index`]): each token is
+    /// tokenized into trigrams that must **all** match (`Operator::And`), so the
+    /// candidate set is tight (≈ docs that actually contain the substring, modulo
+    /// rare trigram coincidences the prefix recheck drops). Multiple tokens (a
+    /// multi-word literal) are ANDed as separate clauses so they may match
+    /// anywhere/independently — matching the handler's per-token prefix recheck,
+    /// not a contiguous phrase. Tokens shorter than [`NGRAM_LEN`] can't be
+    /// tokenized and are skipped (the caller already drops them upstream).
+    ///
+    /// [`ensure_fts_index`]: Self::ensure_fts_index
+    pub async fn substring_search(
         &self,
-        term: &str,
+        tokens: &[String],
         k: usize,
         sha_filter: &[String],
     ) -> Result<Vec<Hit>, String> {
@@ -322,23 +363,80 @@ impl VectorStore {
         if sha_filter.is_empty() {
             return Ok(Vec::new());
         }
+        let clauses: Vec<FtsQuery> = tokens
+            .iter()
+            .filter(|t| t.chars().count() >= NGRAM_LEN as usize)
+            .map(|t| {
+                FtsQuery::Match(
+                    MatchQuery::new(t.clone())
+                        .with_column(Some("text".to_string()))
+                        // All trigrams of the token must be present…
+                        .with_operator(Operator::And)
+                        // …and matched exactly — no fuzzy trigram expansion.
+                        .with_fuzziness(Some(0)),
+                )
+            })
+            .collect();
+        if clauses.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One token → a plain Match; several → all required (Boolean MUST).
+        let query = if clauses.len() == 1 {
+            clauses.into_iter().next().unwrap()
+        } else {
+            FtsQuery::Boolean(BooleanQuery::new(
+                clauses.into_iter().map(|c| (Occur::Must, c)),
+            ))
+        };
         let batches: Vec<RecordBatch> = table
             .query()
             .only_if(sha_in(sha_filter))
-            .full_text_search(FullTextSearchQuery::new(term.to_string()))
+            .full_text_search(FullTextSearchQuery::new_query(query))
             .limit(k)
             .execute()
             .await
-            .map_err(|e| format!("execute fts query: {e}"))?
+            .map_err(|e| format!("execute substring query: {e}"))?
             .try_collect()
             .await
-            .map_err(|e| format!("collect fts results: {e}"))?;
-        // FTS returns a BM25 `_score` (higher = better); map to a pseudo-distance
-        // so callers can treat all hits uniformly.
+            .map_err(|e| format!("collect substring results: {e}"))?;
         let mut hits = rows_to_hits(&batches, "_score", false)?;
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(k);
         Ok(hits)
+    }
+
+    /// Reclaim disk by compacting fragments and pruning stale dataset/index
+    /// versions. Every append creates new fragments and every `create_index`
+    /// (re)build is additive — old versions linger on disk, so repeated
+    /// re-indexing bloats the store (observed ~250 MB of mostly stale index
+    /// versions). Compaction merges small fragments; the prune drops every
+    /// version but the current one to free that space.
+    ///
+    /// `delete_unverified` + `older_than = 0` deletes all non-current versions,
+    /// which would corrupt an in-flight reader on a different snapshot. This is
+    /// safe **only** because all store access is serialized behind the async
+    /// mutex in `lib.rs`: the post-index call site holds the guard exclusively,
+    /// so no reader is mid-scan on an older version.
+    pub async fn compact(&mut self) -> Result<(), String> {
+        let Some(table) = &self.table else {
+            return Ok(());
+        };
+        table
+            .optimize(OptimizeAction::Compact {
+                options: CompactionOptions::default(),
+                remap_options: None,
+            })
+            .await
+            .map_err(|e| format!("compact files: {e}"))?;
+        table
+            .optimize(OptimizeAction::Prune {
+                older_than: Some(Duration::seconds(0)),
+                delete_unverified: Some(true),
+                error_if_tagged_old_versions: Some(false),
+            })
+            .await
+            .map_err(|e| format!("prune old versions: {e}"))?;
+        Ok(())
     }
 
     /// Delete every chunk belonging to a file (used when a file is GC'd).
@@ -365,6 +463,26 @@ impl VectorStore {
             .await
             .map_err(|e| format!("count rows: {e}"))
     }
+}
+
+/// Drop the `chunks` table entirely. No-op if it doesn't exist yet.
+///
+/// Used when the active embedding model changes: every stored vector is then from
+/// a different model (and possibly a different dimension), so the table is dropped
+/// and recreated at the new model's dim on the next [`VectorStore::insert`]. Run
+/// this on the shared connection *before* opening the store, so it reopens clean.
+pub async fn drop_chunks(conn: &Connection) -> Result<(), String> {
+    let names = conn
+        .table_names()
+        .execute()
+        .await
+        .map_err(|e| format!("list tables: {e}"))?;
+    if names.iter().any(|n| n == TABLE_NAME) {
+        conn.drop_table(TABLE_NAME, &[])
+            .await
+            .map_err(|e| format!("drop chunks table: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Build a `sha512 IN ('a','b',...)` predicate. SHA-512 hex is a safe charset.
@@ -495,6 +613,85 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn substring_search_is_case_insensitive_and_substring() {
+        let (mut store, _t) = temp_store(2).await;
+        store
+            .insert(&[
+                row("f", "The Greenhouse effect", vec![1.0, 0.0]),
+                row("f", "evergreen forest", vec![0.0, 1.0]),
+                row("f", "a house of cards", vec![1.0, 1.0]),
+            ])
+            .await
+            .unwrap();
+        store.ensure_fts_index().await.unwrap();
+
+        // `green` is a substring of both "Greenhouse" (case-insensitive, via the
+        // lower-casing trigram index) and "evergreen" — substring_search is the
+        // coarse superset, so it returns both. (The handler's prefix recheck
+        // later drops "evergreen".) "house" lacks the `gre` trigram → excluded.
+        let hits = store
+            .substring_search(&["green".into()], 10, &["f".into()])
+            .await
+            .unwrap();
+        let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(hits.len(), 2, "got {texts:?}");
+        assert!(texts.contains(&"The Greenhouse effect"));
+        assert!(texts.contains(&"evergreen forest"));
+
+        // No trigram match → empty; empty filter / no usable tokens → empty.
+        assert!(store
+            .substring_search(&["zzz".into()], 10, &["f".into()])
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(store
+            .substring_search(&["green".into()], 10, &[])
+            .await
+            .unwrap()
+            .is_empty());
+        // Token shorter than the trigram length is skipped → no clauses → empty.
+        assert!(store
+            .substring_search(&["gr".into()], 10, &["f".into()])
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn substring_search_multi_token_requires_all() {
+        let (mut store, _t) = temp_store(2).await;
+        store
+            .insert(&[
+                row("f", "new yorker magazine", vec![1.0, 0.0]),
+                row("f", "new jersey transit", vec![0.0, 1.0]),
+            ])
+            .await
+            .unwrap();
+        store.ensure_fts_index().await.unwrap();
+
+        // Both tokens must be substrings (independently). "new yorker" has both
+        // `new` and `york`; "new jersey" has `new` but not `york`.
+        let hits = store
+            .substring_search(&["new".into(), "york".into()], 10, &["f".into()])
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "new yorker magazine");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compact_runs_clean_on_a_populated_table() {
+        let (mut store, _t) = temp_store(2).await;
+        store
+            .insert(&[row("a", "x", vec![1.0, 0.0]), row("b", "y", vec![0.0, 1.0])])
+            .await
+            .unwrap();
+        // Compaction + prune should succeed and leave the data intact.
+        store.compact().await.unwrap();
+        assert_eq!(store.count_for(&["a".into(), "b".into()]).await.unwrap(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
