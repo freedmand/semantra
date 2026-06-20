@@ -149,6 +149,54 @@ jobs:
           name: model-mdbr-leaf-mt
           path: src-tauri/models/mdbr-leaf-mt
 
+      # Notarization requires EVERY Mach-O in the bundle to be Developer-ID-signed
+      # with a secure timestamp. Tauri signs the main binary + the .app, but the
+      # bundled libpdfium.dylib (a loose dylib under Resources/) is left unsigned,
+      # so the notary rejects the whole archive. Fix: fetch + sign the dylib here
+      # and drop it where build.rs caches it (build.rs skips the download when the
+      # file already exists), so the bundle picks up the signed copy. macOS only.
+      - name: Pre-sign bundled libpdfium (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          # Keep this tag in sync with PDFIUM_RELEASE in src-tauri/build.rs.
+          PDFIUM_TAG="chromium%2F7881"
+          case "${{ matrix.rust_target }}" in
+            aarch64-apple-darwin) ARCHIVE="pdfium-mac-arm64.tgz" ;;
+            x86_64-apple-darwin)  ARCHIVE="pdfium-mac-x64.tgz" ;;
+            *) echo "unexpected target ${{ matrix.rust_target }}"; exit 1 ;;
+          esac
+          mkdir -p src-tauri/libpdfium
+          curl -fSL --retry 3 -o "$RUNNER_TEMP/pdfium.tgz" \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${ARCHIVE}"
+          tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP" lib/libpdfium.dylib
+          cp "$RUNNER_TEMP/lib/libpdfium.dylib" src-tauri/libpdfium/libpdfium.dylib
+
+          # Import the Developer ID cert into a dedicated keychain so codesign can
+          # find the identity (tauri-action's own keychain isn't set up yet).
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          KEYCHAIN="$RUNNER_TEMP/libpdfium-signing.keychain-db"
+          KCPW="$(openssl rand -base64 24)"
+          security create-keychain -p "$KCPW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KCPW" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KCPW" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+
+          codesign --force --timestamp --options runtime \
+            --sign "$APPLE_SIGNING_IDENTITY" src-tauri/libpdfium/libpdfium.dylib
+          echo "--- libpdfium signature ---"
+          codesign -dvv src-tauri/libpdfium/libpdfium.dylib 2>&1 \
+            | grep -iE "Authority|Timestamp|Signature|Runtime" || true
+          rm -f "$RUNNER_TEMP/cert.p12"
+
       - name: Build and bundle
         uses: tauri-apps/tauri-action@v0
         env:
