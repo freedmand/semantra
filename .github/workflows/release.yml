@@ -69,26 +69,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: macOS (Apple Silicon)
+          # One universal-apple-darwin DMG covering Intel + Apple Silicon, built
+          # on the Apple Silicon runner. GitHub is retiring Intel (macos-13)
+          # runners, so rather than a separate Intel job we fuse both arch slices
+          # with lipo. `universal-apple-darwin` isn't a real rustup target, so
+          # toolchain_targets installs the two real targets it's built from.
+          - name: macOS (Universal)
             os: macos-14
-            rust_target: aarch64-apple-darwin
-            args: "--target aarch64-apple-darwin"
-          # Cross-compiled on the Apple Silicon runner (macos-14): GitHub is
-          # retiring Intel macos-13 runners and Intel jobs no longer get
-          # scheduled. The arm runner builds the x86_64 slice fine (universal
-          # macOS SDK; the binary is never executed during build, only signed +
-          # notarized), so we still ship a separate, smaller Intel DMG.
-          - name: macOS (Intel)
-            os: macos-14
-            rust_target: x86_64-apple-darwin
-            args: "--target x86_64-apple-darwin"
+            rust_target: universal-apple-darwin
+            toolchain_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: "--target universal-apple-darwin"
           - name: Linux (x86_64)
             os: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
+            toolchain_targets: x86_64-unknown-linux-gnu
             args: ""
           - name: Windows (x86_64)
             os: windows-latest
             rust_target: x86_64-pc-windows-msvc
+            toolchain_targets: x86_64-pc-windows-msvc
             args: ""
 
     runs-on: ${{ matrix.os }}
@@ -123,7 +122,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.rust_target }}
+          targets: ${{ matrix.toolchain_targets }}
 
       # Cache the (large) Rust dependency build — datafusion/lance/candle dominate
       # compile time. Scoped to the src-tauri crate.
@@ -170,16 +169,34 @@ jobs:
           set -euo pipefail
           # Keep this tag in sync with PDFIUM_RELEASE in src-tauri/build.rs.
           PDFIUM_TAG="chromium%2F7881"
+          BASE="https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}"
+          mkdir -p src-tauri/libpdfium
+          # For the universal build, fetch BOTH arch dylibs and lipo them into one
+          # fat dylib so the single bundled resource is valid for both slices.
+          # build.rs runs per-arch but skips the download when this file exists,
+          # so both arch builds pick up the signed universal dylib.
+          fetch() { # $1 = archive, $2 = dest dir
+            curl -fSL --retry 3 -o "$RUNNER_TEMP/$1" "$BASE/$1"
+            mkdir -p "$RUNNER_TEMP/$2"
+            tar xzf "$RUNNER_TEMP/$1" -C "$RUNNER_TEMP/$2" lib/libpdfium.dylib
+          }
           case "${{ matrix.rust_target }}" in
-            aarch64-apple-darwin) ARCHIVE="pdfium-mac-arm64.tgz" ;;
-            x86_64-apple-darwin)  ARCHIVE="pdfium-mac-x64.tgz" ;;
+            aarch64-apple-darwin)
+              fetch pdfium-mac-arm64.tgz arm
+              cp "$RUNNER_TEMP/arm/lib/libpdfium.dylib" src-tauri/libpdfium/libpdfium.dylib ;;
+            x86_64-apple-darwin)
+              fetch pdfium-mac-x64.tgz x64
+              cp "$RUNNER_TEMP/x64/lib/libpdfium.dylib" src-tauri/libpdfium/libpdfium.dylib ;;
+            universal-apple-darwin)
+              fetch pdfium-mac-arm64.tgz arm
+              fetch pdfium-mac-x64.tgz x64
+              lipo -create \
+                "$RUNNER_TEMP/arm/lib/libpdfium.dylib" \
+                "$RUNNER_TEMP/x64/lib/libpdfium.dylib" \
+                -output src-tauri/libpdfium/libpdfium.dylib
+              echo "--- fat libpdfium archs ---"; lipo -archs src-tauri/libpdfium/libpdfium.dylib ;;
             *) echo "unexpected target ${{ matrix.rust_target }}"; exit 1 ;;
           esac
-          mkdir -p src-tauri/libpdfium
-          curl -fSL --retry 3 -o "$RUNNER_TEMP/pdfium.tgz" \
-            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/${ARCHIVE}"
-          tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP" lib/libpdfium.dylib
-          cp "$RUNNER_TEMP/lib/libpdfium.dylib" src-tauri/libpdfium/libpdfium.dylib
 
           # Import the Developer ID cert into a dedicated keychain so codesign can
           # find the identity (tauri-action's own keychain isn't set up yet).
