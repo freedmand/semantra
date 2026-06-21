@@ -19,9 +19,9 @@ name = "verify"
 path = "src/verify.rs"
 
 [dependencies]
-candle-core = "0.8"
-candle-nn = "0.8"
-candle-transformers = "0.8"
+candle-core = "0.10"
+candle-nn = "0.10"
+candle-transformers = "0.10"
 tokenizers = "0.20"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
@@ -40,6 +40,6 @@ serde_json = "1"
 # NOTE: Metal is not always faster — GPU dispatch overhead can dominate for small
 # batches. The env var LEAF_IR_DEVICE=cpu|metal forces a device for A/B timing.
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
-candle-core = { version = "0.8", features = ["accelerate", "metal"] }
-candle-nn = { version = "0.8", features = ["accelerate", "metal"] }
-candle-transformers = { version = "0.8", features = ["accelerate", "metal"] }
+candle-core = { version = "0.10", features = ["accelerate", "metal"] }
+candle-nn = { version = "0.10", features = ["accelerate", "metal"] }
+candle-transformers = { version = "0.10", features = ["accelerate", "metal"] }

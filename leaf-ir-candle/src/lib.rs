@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use anyhow::{bail, Error, Result};
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
 use tokenizers::Tokenizer;
@@ -67,6 +67,21 @@ fn select_device() -> Device {
     device
 }
 
+/// BERT compute precision, from `LEAF_IR_DTYPE` (default f32). An A/B benchmark
+/// knob, NOT a recommended setting: on this small model (6 layers, 384 hidden)
+/// f16/bf16 measured *slower* than f32 on M1 Metal (~439/399 vs ~500 chunks/s) —
+/// the workload is dispatch/bandwidth-bound, so half precision adds conversion
+/// overhead without a FLOP win. Kept for re-evaluation if a larger model is
+/// adopted. Downstream pooling + the linear head always run f32 (hidden upcast
+/// post-forward). Requires candle >= 0.10 (older candle hardcodes the mask f32).
+fn inference_dtype() -> DType {
+    match std::env::var("LEAF_IR_DTYPE").ok().as_deref() {
+        Some("f16") | Some("fp16") | Some("half") => DType::F16,
+        Some("bf16") | Some("bfloat16") => DType::BF16,
+        _ => DTYPE, // f32
+    }
+}
+
 /// Load tokenizer + BERT + dense head from `base_dir`, the directory that holds
 /// `config.json`, `tokenizer.json`, `model.safetensors`, and `2_Dense/`.
 pub fn setup_model(base_dir: impl AsRef<Path>) -> Result<ModelCtx> {
@@ -86,7 +101,13 @@ pub fn setup_model(base_dir: impl AsRef<Path>) -> Result<ModelCtx> {
 
     let config: Config = serde_json::from_str(&std::fs::read_to_string(base_dir.join(CONFIG))?)?;
     let bert_weights = base_dir.join(BERT_WEIGHTS);
-    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[bert_weights], DTYPE, &device)? };
+    // BERT's transformer layers are the bulk of inference cost. Optionally run
+    // them in half precision (LEAF_IR_DTYPE=f16|bf16) for throughput; the hidden
+    // states are upcast back to f32 right after `forward` (in embed/explain), so
+    // pooling, the Dense head, and the explain decomposition stay exactly f32.
+    let bert_dtype = inference_dtype();
+    eprintln!("[leaf-ir] bert compute dtype: {bert_dtype:?}");
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[bert_weights], bert_dtype, &device)? };
     let model = BertModel::load(vb, &config)?;
 
     // The Dense head maps BERT's hidden size to the model's embedding dim. Both
@@ -150,9 +171,12 @@ pub fn embed_sentences(ctx: &ModelCtx, sentences: &[String]) -> Result<Embedding
     let attention_mask = Tensor::from_vec(masks.concat(), (batch, seq_len), &ctx.device)?;
     let token_type_ids = token_ids.zeros_like()?;
 
+    // Upcast to f32 immediately so all pooling/projection math is exact regardless
+    // of the BERT compute dtype (no-op when LEAF_IR_DTYPE is f32).
     let hidden = ctx
         .model
-        .forward(&token_ids, &token_type_ids, Some(&attention_mask))?;
+        .forward(&token_ids, &token_type_ids, Some(&attention_mask))?
+        .to_dtype(DTYPE)?;
 
     // mask-aware mean pool
     let mask_f = attention_mask.to_dtype(DTYPE)?;
@@ -270,6 +294,7 @@ pub fn explain_similarity_batch(
     let hidden = ctx
         .model
         .forward(&token_ids, &token_type_ids, Some(&attention_mask))?
+        .to_dtype(DTYPE)? // upcast post-forward; decomposition math stays f32
         .contiguous()?;
     let hidden_size = hidden.dim(2)?;
 
