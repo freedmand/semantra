@@ -74,12 +74,15 @@ pub fn setup_model(base_dir: impl AsRef<Path>) -> Result<ModelCtx> {
     let device = select_device();
 
     let mut tokenizer = Tokenizer::from_file(base_dir.join(TOKENIZER)).map_err(Error::msg)?;
-    if tokenizer.get_padding().is_none() {
-        tokenizer.with_padding(Some(tokenizers::PaddingParams {
-            strategy: tokenizers::PaddingStrategy::BatchLongest,
-            ..Default::default()
-        }));
-    }
+    // Always pad to the longest sequence in the *batch*, overriding whatever the
+    // tokenizer file ships (mdbr-leaf-mt ships Fixed(128)). Our chunks are ~50
+    // words ≈ 65-80 tokens, so Fixed(128) computes ~1.5-2x more token-positions
+    // than needed on every chunk. Pad tokens are masked out in the mean-pool, so
+    // BatchLongest yields *identical* embeddings — this is a pure throughput win.
+    tokenizer.with_padding(Some(tokenizers::PaddingParams {
+        strategy: tokenizers::PaddingStrategy::BatchLongest,
+        ..Default::default()
+    }));
 
     let config: Config = serde_json::from_str(&std::fs::read_to_string(base_dir.join(CONFIG))?)?;
     let bert_weights = base_dir.join(BERT_WEIGHTS);

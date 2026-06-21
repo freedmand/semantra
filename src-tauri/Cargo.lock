@@ -6853,7 +6853,7 @@ dependencies = [
 
 [[package]]
 name = "semantra"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow-array",
  "arrow-schema",

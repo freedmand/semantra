@@ -1,6 +1,6 @@
 [package]
 name = "semantra"
-version = "0.1.1"
+version = "0.1.2"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -102,33 +102,63 @@ tokio = { version = "1", features = ["sync"] }
 [profile.dev.package."*"]
 opt-level = 3
 
-# Release profile: optimize for SPEED (opt-level = 3). The vector store's hot
-# paths — LanceDB / DataFusion / Arrow query execution and lance-linalg's SIMD
-# distance kernels — run *far* faster at opt-3, which auto-vectorizes. The old
-# size-tuned "z" disabled auto-vectorization and minimized inlining, which made
-# indexing + search crawl in the *shipped* build while embedding still felt fast
-# (candle was individually exempted, Metal does the matmuls). `tauri dev` never
-# showed it because [profile.dev.package."*"] already builds every dep at opt-3.
-# We accept a larger binary (this stack — LanceDB/DataFusion/Arrow/sqlparser — is
-# most of the bytes) in exchange for throughput. Dead-code pruning is preserved:
-# lto/strip/panic below are all independent of opt-level, so opt-3 prunes exactly
-# as much as "z" did — it just additionally inlines and vectorizes.
+# Aggressive size-optimized release. The shipped binary is dominated by the
+# LanceDB/DataFusion/Arrow/sqlparser stack (a full columnar SQL engine pulled in
+# for the vector store) — NOT the ML runtime — so squeezing dependency code is
+# the lever. Combined effect of these four: ~183MB -> see below.
 #
-#   opt-level = 3       optimize for speed (auto-vectorization + inlining)
+# NOTE: opt-level here only governs the LanceDB stack, which a phase-breakdown
+# benchmark (tests/index_bench.rs) showed is just ~2-5% of indexing time — the
+# rest is embedding (candle/Metal, exempted to opt-3 below). So "z" costs almost
+# nothing on speed and keeps the binary small; don't raise it expecting a
+# search/indexing win (it won't move — fix the embedding path instead).
+#
+#   opt-level = "z"     optimize for size over speed (smallest codegen)
 #   lto = "fat"         whole-program inlining + cross-crate dead-code elimination
 #   codegen-units = 1   no parallel-codegen duplication; maximizes LTO's reach
-#   strip = true        drop the symbol table (__LINKEDIT)
-#   panic = "abort"     no unwind tables/landing pads. NOTE: a panic aborts the
-#                       process instead of unwinding; drop this flag if you see
-#                       hard crashes where an error was previously caught.
+#   strip = true        drop the ~33MB symbol table (__LINKEDIT)
+#   panic = "abort"     no unwind tables/landing pads. NOTE: a panic now aborts
+#                       the process instead of unwinding; drop this flag if you
+#                       see hard crashes where an error was previously caught.
 #                       (Cargo still builds test/bench harnesses with unwind, so
 #                       `cargo test --release` is unaffected.)
 [profile.release]
-opt-level = 3
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Exempt the embedding hot path from size optimization: "z" guts matmul
+# throughput (see the dev-profile note above — ~13x), and these crates are a
+# tiny slice of the binary, so keeping them at opt-level 3 costs little size and
+# preserves embedding speed.
+[profile.release.package.candle-core]
+opt-level = 3
+[profile.release.package.candle-nn]
+opt-level = 3
+[profile.release.package.candle-transformers]
+opt-level = 3
+[profile.release.package.candle-metal-kernels]
+opt-level = 3
+[profile.release.package.gemm]
+opt-level = 3
+[profile.release.package.gemm-common]
+opt-level = 3
+[profile.release.package.gemm-f16]
+opt-level = 3
+[profile.release.package.gemm-f32]
+opt-level = 3
+[profile.release.package.gemm-f64]
+opt-level = 3
+[profile.release.package.gemm-c32]
+opt-level = 3
+[profile.release.package.gemm-c64]
+opt-level = 3
+[profile.release.package.half]
+opt-level = 3
+[profile.release.package.matrixmultiply]
+opt-level = 3
 
 # Vendored fix for lance-linalg 7.0.0: its build.rs compiles the AVX-512
 # dist_table.c kernel with `-march=native`, which fails when cross-compiling the
