@@ -84,8 +84,13 @@ jobs:
             rust_target: x86_64-unknown-linux-gnu
             toolchain_targets: x86_64-unknown-linux-gnu
             args: ""
+          # Pinned to windows-2022 (stable VS 2022 / MSVC 14.4x) rather than
+          # windows-latest: the latter rolled to a VS 18 *preview* MSVC
+          # (14.51) that ICEs stable rustc while compiling semantra_lib
+          # ("TryFromIntError" panic). v0.1.3 built fine on VS 2022, so we pin
+          # the known-good toolchain instead of chasing the preview's bug.
           - name: Windows (x86_64)
-            os: windows-latest
+            os: windows-2022
             rust_target: x86_64-pc-windows-msvc
             toolchain_targets: x86_64-pc-windows-msvc
             args: ""

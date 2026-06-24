@@ -44,17 +44,24 @@ candle-core = { version = "0.10", features = ["accelerate", "metal"] }
 candle-nn = { version = "0.10", features = ["accelerate", "metal"] }
 candle-transformers = { version = "0.10", features = ["accelerate", "metal"] }
 
-# Non-Apple x86_64 (Windows + Linux desktop): route candle's f32 BLAS/GEMM
-# through Intel MKL — the Windows/Linux counterpart to `accelerate` above. Without
-# this, candle falls back to its pure-Rust `gemm` kernels, which left Windows
-# *several times* slower than Mac on the BERT transformer layers (the bulk of
-# embedding cost). `intel-mkl-src` downloads and statically links MKL at build
-# time (+~30-40MB binary, heavier build); it runs on AMD as well as Intel.
+# Windows x86_64: route candle's f32 BLAS/GEMM through Intel MKL — the Windows
+# counterpart to `accelerate` above. Without this, candle falls back to its
+# pure-Rust `gemm` kernels, which left Windows *several times* slower than Mac on
+# the BERT transformer layers (the bulk of embedding cost). `intel-mkl-src`
+# downloads and statically links MKL at build time (+~30-40MB binary, heavier
+# build); it runs on AMD as well as Intel.
+#
+# Scoped to WINDOWS only (not all non-Apple x86_64): the MKL that `intel-mkl-src`
+# ships for Linux is 2020.1, which lacks the half-precision `hgemm_` symbol
+# candle's mkl module references, so a Linux+MKL build fails at link
+# ("undefined symbol: hgemm_"). The Windows image is MKL 2022.0, which has it.
+# Linux was never the perf concern, so it stays on the working `gemm` fallback
+# rather than us fighting the older Linux MKL. Also scoped to x86_64 so
+# Windows-on-ARM (no MKL) builds on `gemm` too.
 #
 # There is NO GPU backend here on purpose: CUDA would help only NVIDIA users at a
 # large build/distribution cost, so the CPU path stays the single shipped target.
-# Scoped to x86_64 so Windows-on-ARM (no MKL) still builds on the `gemm` fallback.
-[target.'cfg(all(target_arch = "x86_64", not(any(target_os = "macos", target_os = "ios"))))'.dependencies]
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
 candle-core = { version = "0.10", features = ["mkl"] }
 candle-nn = { version = "0.10", features = ["mkl"] }
 candle-transformers = { version = "0.10", features = ["mkl"] }
