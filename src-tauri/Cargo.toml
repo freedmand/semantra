@@ -12,7 +12,14 @@ edition = "2021"
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "semantra_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# NOTE: `staticlib` is intentionally omitted. It is only needed for mobile (iOS)
+# targets, which this desktop-only app does not ship — the desktop binary
+# consumes the lib as `rlib`. Building `staticlib` bundles the ENTIRE dependency
+# closure into one `.lib` archive; once Windows pulls in statically-linked Intel
+# MKL (hundreds of MB), that archive overflows a 32-bit size field in rustc's
+# archive writer and ICEs ("TryFromIntError" at ar_archive_writer.rs). Dropping
+# the unused crate-type sidesteps the giant archive entirely.
+crate-type = ["cdylib", "rlib"]
 
 # Explicit binary target so the executable (and thus the macOS dock label in
 # `tauri dev`) is title-cased "Semantra" rather than the lowercase crate name.
