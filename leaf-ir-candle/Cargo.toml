@@ -43,3 +43,18 @@ serde_json = "1"
 candle-core = { version = "0.10", features = ["accelerate", "metal"] }
 candle-nn = { version = "0.10", features = ["accelerate", "metal"] }
 candle-transformers = { version = "0.10", features = ["accelerate", "metal"] }
+
+# Non-Apple x86_64 (Windows + Linux desktop): route candle's f32 BLAS/GEMM
+# through Intel MKL — the Windows/Linux counterpart to `accelerate` above. Without
+# this, candle falls back to its pure-Rust `gemm` kernels, which left Windows
+# *several times* slower than Mac on the BERT transformer layers (the bulk of
+# embedding cost). `intel-mkl-src` downloads and statically links MKL at build
+# time (+~30-40MB binary, heavier build); it runs on AMD as well as Intel.
+#
+# There is NO GPU backend here on purpose: CUDA would help only NVIDIA users at a
+# large build/distribution cost, so the CPU path stays the single shipped target.
+# Scoped to x86_64 so Windows-on-ARM (no MKL) still builds on the `gemm` fallback.
+[target.'cfg(all(target_arch = "x86_64", not(any(target_os = "macos", target_os = "ios"))))'.dependencies]
+candle-core = { version = "0.10", features = ["mkl"] }
+candle-nn = { version = "0.10", features = ["mkl"] }
+candle-transformers = { version = "0.10", features = ["mkl"] }

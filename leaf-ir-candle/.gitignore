@@ -2,3 +2,7 @@
 # The demo/verify binaries load weights from ./models (fetched out-of-band).
 # Vendored into semantra; the app itself loads models from src-tauri/models.
 /models
+# Library crate: its lockfile is not authoritative (the app's
+# src-tauri/Cargo.lock resolves the full tree). Avoid committing a stray lock
+# that can drift — e.g. one written by an incidental `cargo metadata` run.
+/Cargo.lock
