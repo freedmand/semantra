@@ -1491,91 +1491,144 @@ async fn search_project(
         .collect())
 }
 
+/// Everything the app needs before the window can work: the model (on its
+/// inference thread), PDFium, the LanceDB store + catalog, and the indexing
+/// worker.
+fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // MLX must find its compiled Metal kernels before any model work. A
+    // bundled app ships them as a resource; dev builds use the compiled-in
+    // path (src-tauri/mlx/, which exists on the dev machine).
+    if let Some(metallib) = metallib_resource(app) {
+        semantra_embed::set_metallib_path(&metallib).map_err(|e| e.to_string())?;
+    }
+
+    // Load the model on its inference thread (which then warms up the
+    // Metal kernels in the background before taking any work).
+    let model_dir = resolve_model_dir(app)?;
+    let embedder = EmbedService::spawn(model_dir, EMBED_DIM).map_err(|e| e.to_string())?;
+    let embedding_dim = embedder.embedding_dim() as i32;
+    app.manage(embedder);
+
+    // Bind the bundled PDFium library once and share the single instance.
+    let pdfium_dir = resolve_pdfium_dir(app)?;
+    let pdfium = pdf::load_library(&pdfium_dir)?;
+    app.manage(SharedPdfium::new(pdfium));
+
+    // Persistent app-data layout: lancedb/ (vectors + metadata) and files/
+    // (copied originals, keyed by SHA-512).
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app data dir: {e}"))?;
+    let lancedb_dir = app_data.join("lancedb");
+    let files_dir = app_data.join("files");
+    std::fs::create_dir_all(&lancedb_dir).map_err(|e| format!("create lancedb dir: {e}"))?;
+    std::fs::create_dir_all(&files_dir).map_err(|e| format!("create files dir: {e}"))?;
+    app.manage(AppPaths { files_dir });
+
+    // One LanceDB connection, shared (cloned) by the store and catalog.
+    let (store, catalog) = tauri::async_runtime::block_on(async {
+        let uri = lancedb_dir
+            .to_str()
+            .ok_or_else(|| "lancedb path is not valid UTF-8".to_string())?;
+        let conn = lancedb::connect(uri)
+            .execute()
+            .await
+            .map_err(|e| format!("connect lancedb: {e}"))?;
+        let catalog = Catalog::open(conn.clone()).await?;
+
+        // If the active embedding model (or chunker) changed since this DB
+        // was last written, every stored vector is from a different model —
+        // and likely a different dimension — so it can't be queried as-is.
+        // Re-enqueue every file for indexing and drop the stale vectors;
+        // querying any project then requires the new model's re-index to
+        // finish. `pipeline_version()` is derived from MODEL_NAME, so this
+        // triggers automatically the first time the app runs after a switch.
+        let active = pipeline_version();
+        let stored = catalog.get_meta(DB_MODEL_KEY).await?;
+        if stored.as_deref() != Some(active.as_str()) {
+            let n = catalog.requeue_all_for_reindex(now_ms()).await?;
+            let retried = catalog.retry_failed_jobs().await?;
+            if retried > 0 {
+                eprintln!("[semantra] retrying {retried} previously failed file(s)");
+            }
+            store::drop_chunks(&conn).await?;
+            catalog.set_meta(DB_MODEL_KEY, &active).await?;
+            if stored.is_some() {
+                eprintln!(
+                    "[semantra] embedding pipeline changed to {active}; \
+                     re-indexing {n} file reference(s)"
+                );
+            }
+        }
+
+        let store = VectorStore::open(conn, embedding_dim).await?;
+        Ok::<_, String>((store, catalog))
+    })?;
+    app.manage(SharedStore::new(store));
+    app.manage(SharedCatalog::new(catalog));
+
+    // Indexing-worker plumbing: a notifier to wake it on new work and a
+    // slot holding the file it is currently embedding.
+    let notify: SharedNotify = Arc::new(Notify::new());
+    app.manage(Arc::clone(&notify));
+    app.manage(SharedActive::new(Mutex::new(None)));
+
+    // Spawn the background indexing worker. It drains any jobs that
+    // survived a prior shutdown (crash-resume) and then any newly
+    // enqueued ones; the initial `notify_one` kicks off that first drain.
+    let worker_app = app.handle().clone();
+    tauri::async_runtime::spawn(async move { index_worker(worker_app).await });
+    notify.notify_one();
+    Ok(())
+}
+
+/// The bundled `mlx.metallib` (Resources/mlx/), if this is a bundled app.
+fn metallib_resource(app: &tauri::App) -> Option<PathBuf> {
+    let p = app
+        .path()
+        .resolve("mlx/mlx.metallib", tauri::path::BaseDirectory::Resource)
+        .ok()?;
+    p.exists().then_some(p)
+}
+
+/// Startup failed: write the error to ~/Library/Logs/Semantra/startup-error.log
+/// and show it in a native alert (the window isn't usable yet).
+fn report_startup_failure(message: &str) {
+    eprintln!("[semantra] startup failed: {message}");
+    if let Some(home) = std::env::var_os("HOME") {
+        let dir = PathBuf::from(home).join("Library/Logs/Semantra");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(
+                dir.join("startup-error.log"),
+                format!("Semantra {} failed to start:\n{message}\n", env!("CARGO_PKG_VERSION")),
+            );
+        }
+    }
+    let _ = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Semantra couldn't start")
+        .set_description(format!(
+            "{message}\n\nDetails were saved to ~/Library/Logs/Semantra/startup-error.log."
+        ))
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
-            // Load the model on its inference thread (which then warms up the
-            // Metal kernels in the background before taking any work).
-            let model_dir = resolve_model_dir(app)?;
-            let embedder = EmbedService::spawn(model_dir, EMBED_DIM).map_err(|e| e.to_string())?;
-            let embedding_dim = embedder.embedding_dim() as i32;
-            app.manage(embedder);
-
-            // Bind the bundled PDFium library once and share the single instance.
-            let pdfium_dir = resolve_pdfium_dir(app)?;
-            let pdfium = pdf::load_library(&pdfium_dir)?;
-            app.manage(SharedPdfium::new(pdfium));
-
-            // Persistent app-data layout: lancedb/ (vectors + metadata) and files/
-            // (copied originals, keyed by SHA-512).
-            let app_data = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("resolve app data dir: {e}"))?;
-            let lancedb_dir = app_data.join("lancedb");
-            let files_dir = app_data.join("files");
-            std::fs::create_dir_all(&lancedb_dir).map_err(|e| format!("create lancedb dir: {e}"))?;
-            std::fs::create_dir_all(&files_dir).map_err(|e| format!("create files dir: {e}"))?;
-            app.manage(AppPaths { files_dir });
-
-            // One LanceDB connection, shared (cloned) by the store and catalog.
-            let (store, catalog) = tauri::async_runtime::block_on(async {
-                let uri = lancedb_dir
-                    .to_str()
-                    .ok_or_else(|| "lancedb path is not valid UTF-8".to_string())?;
-                let conn = lancedb::connect(uri)
-                    .execute()
-                    .await
-                    .map_err(|e| format!("connect lancedb: {e}"))?;
-                let catalog = Catalog::open(conn.clone()).await?;
-
-                // If the active embedding model (or chunker) changed since this DB
-                // was last written, every stored vector is from a different model —
-                // and likely a different dimension — so it can't be queried as-is.
-                // Re-enqueue every file for indexing and drop the stale vectors;
-                // querying any project then requires the new model's re-index to
-                // finish. `pipeline_version()` is derived from MODEL_NAME, so this
-                // triggers automatically the first time the app runs after a switch.
-                let active = pipeline_version();
-                let stored = catalog.get_meta(DB_MODEL_KEY).await?;
-                if stored.as_deref() != Some(active.as_str()) {
-                    let n = catalog.requeue_all_for_reindex(now_ms()).await?;
-                    let retried = catalog.retry_failed_jobs().await?;
-                    if retried > 0 {
-                        eprintln!("[semantra] retrying {retried} previously failed file(s)");
-                    }
-                    store::drop_chunks(&conn).await?;
-                    catalog.set_meta(DB_MODEL_KEY, &active).await?;
-                    if stored.is_some() {
-                        eprintln!(
-                            "[semantra] embedding pipeline changed to {active}; \
-                             re-indexing {n} file reference(s)"
-                        );
-                    }
-                }
-
-                let store = VectorStore::open(conn, embedding_dim).await?;
-                Ok::<_, String>((store, catalog))
-            })?;
-            app.manage(SharedStore::new(store));
-            app.manage(SharedCatalog::new(catalog));
-
-            // Indexing-worker plumbing: a notifier to wake it on new work and a
-            // slot holding the file it is currently embedding.
-            let notify: SharedNotify = Arc::new(Notify::new());
-            app.manage(Arc::clone(&notify));
-            app.manage(SharedActive::new(Mutex::new(None)));
-
-            // Spawn the background indexing worker. It drains any jobs that
-            // survived a prior shutdown (crash-resume) and then any newly
-            // enqueued ones; the initial `notify_one` kicks off that first drain.
-            let worker_app = app.handle().clone();
-            tauri::async_runtime::spawn(async move { index_worker(worker_app).await });
-            notify.notify_one();
-            Ok(())
+        .setup(|app| match setup_app(app) {
+            Ok(()) => Ok(()),
+            // A failed startup used to surface as a panic -> abort (release
+            // builds use panic = "abort"): a silent crash report. Explain it
+            // instead, keep a log for bug reports, and exit cleanly.
+            Err(e) => {
+                report_startup_failure(&e.to_string());
+                std::process::exit(1);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             list_projects,

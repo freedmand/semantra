@@ -1,0 +1,7 @@
+[env]
+# Where mlx-sys writes MLX's compiled Metal kernels (mlx.metallib) — a fixed
+# path inside this crate (src-tauri/mlx/) instead of a per-user ~/.mlx/lib/<hash>
+# dir. The app bundles this file as a resource and points MLX at it at startup
+# (see `metallib_resource` in src/lib.rs); without it, MLX looks for the path it
+# was compiled with, which only exists on the build machine.
+MLX_RS_METAL_PATH = { value = "mlx", relative = true }

@@ -1,13 +1,14 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Semantra",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "identifier": "com.semantra.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm build",
-    "frontendDist": "../build"
+    "frontendDist": "../build",
+    "beforeBundleCommand": "bash src-tauri/scripts/stage-metallib.sh"
   },
   "app": {
     "windows": [
@@ -37,7 +38,8 @@
     "resources": [
       "models/embeddinggemma-2/*.json",
       "models/embeddinggemma-2/model.safetensors",
-      "libpdfium/*"
+      "libpdfium/*",
+      "mlx/*"
     ],
     "icon": [
       "icons/32x32.png",

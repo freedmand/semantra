@@ -43,6 +43,15 @@ pub fn document_prompt(title: Option<&str>) -> String {
     format!("title: {title} | text: ")
 }
 
+/// Point MLX at its compiled Metal kernels (`mlx.metallib`). Must be called
+/// before any MLX work. A bundled app ships the file as a resource: by default
+/// MLX looks for the absolute path it was *built* with, which exists only on
+/// the build machine.
+pub fn set_metallib_path(path: &Path) -> Result<()> {
+    let p = path.to_str().ok_or_else(|| anyhow!("non-UTF-8 metallib path"))?;
+    mlx_rs::metal::set_metallib_path(p).map_err(|e| anyhow!("set metallib path: {e}"))
+}
+
 /// Native output width. Matryoshka-truncated sizes (512/256/128) are prefixes
 /// of this vector, re-normalized.
 pub const FULL_DIM: usize = 768;
