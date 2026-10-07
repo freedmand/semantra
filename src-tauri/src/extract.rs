@@ -4,8 +4,8 @@
 //! file's kind, its canonical full text, and the ordered [`Segment`]s a
 //! [`Chunker`](crate::chunk::Chunker) consumes. PDFs become one segment per page
 //! (so chunks stay page-local and highlightable); plain text becomes a single
-//! flat segment. New file types add an arm here without touching chunking,
-//! embedding, or storage.
+//! flat segment. Images, audio and video have no text: they extract to an
+//! empty text and are embedded directly by the media pipeline (`media.rs`).
 
 use pdfium_render::prelude::Pdfium;
 
@@ -19,6 +19,9 @@ pub enum FileType {
     Text,
     Pdf,
     Csv,
+    Image,
+    Audio,
+    Video,
 }
 
 impl FileType {
@@ -27,6 +30,9 @@ impl FileType {
             FileType::Text => "text",
             FileType::Pdf => "pdf",
             FileType::Csv => "csv",
+            FileType::Image => "image",
+            FileType::Audio => "audio",
+            FileType::Video => "video",
         }
     }
 
@@ -35,6 +41,9 @@ impl FileType {
             "text" => Ok(FileType::Text),
             "pdf" => Ok(FileType::Pdf),
             "csv" => Ok(FileType::Csv),
+            "image" => Ok(FileType::Image),
+            "audio" => Ok(FileType::Audio),
+            "video" => Ok(FileType::Video),
             other => Err(format!("unknown file type {other:?}")),
         }
     }
@@ -59,6 +68,14 @@ const PAGE_SEPARATOR: char = '\n';
 /// (see [`is_pdf`]); a PDF is extracted page-by-page via PDFium, anything else is
 /// decoded leniently as text.
 pub fn extract(pdfium: &Pdfium, path: &str) -> Result<Extracted, String> {
+    if let Some(filetype) = media_type(path) {
+        return Ok(Extracted {
+            filetype,
+            full_text: String::new(),
+            segments: Vec::new(),
+            page_count: None,
+        });
+    }
     if is_pdf(path)? {
         extract_pdf(pdfium, path)
     } else if is_csv(path) {
@@ -202,6 +219,31 @@ fn extract_csv(path: &str) -> Result<Extracted, String> {
         // CSVs have no pages; row count is exposed via the grid, not page_count.
         page_count: None,
     })
+}
+
+/// Still-image extensions ImageIO decodes (incl. HEIC and common camera RAW).
+const IMAGE_EXTS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "bmp", "tif", "tiff", "jp2",
+    "dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2",
+];
+/// Audio-only containers AVFoundation plays.
+const AUDIO_EXTS: &[&str] = &["mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "flac", "m4b"];
+/// Video containers AVFoundation plays (H.264/HEVC/ProRes…).
+const VIDEO_EXTS: &[&str] = &["mp4", "mov", "m4v", "3gp"];
+
+/// Classify image/audio/video files by extension (`None` = a document).
+pub fn media_type(path: &str) -> Option<FileType> {
+    let ext = std::path::Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    let ext = ext.as_str();
+    if IMAGE_EXTS.contains(&ext) {
+        Some(FileType::Image)
+    } else if AUDIO_EXTS.contains(&ext) {
+        Some(FileType::Audio)
+    } else if VIDEO_EXTS.contains(&ext) {
+        Some(FileType::Video)
+    } else {
+        None
+    }
 }
 
 /// Whether the file at `path` is a CSV. Detected by the `.csv` extension only —

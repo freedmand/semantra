@@ -12,6 +12,7 @@
     loadManage,
     addFilesToManage,
     removeManageFile,
+    retryManageFile,
     commitManageRename,
     deleteProject,
     manageRowLabel,
@@ -144,6 +145,14 @@
                 {detail}
               </div>
             </div>
+            {#if row.state === "error"}
+              <button
+                class="px-2 py-1 rounded text-sm shrink-0 border"
+                style="border-color: var(--color-border); background: var(--color-bg-elevated);"
+                onclick={() => retryManageFile(row.sha512)}
+                title="Try indexing this file again">Retry</button
+              >
+            {/if}
             <button
               class="px-2 py-1 rounded text-sm shrink-0"
               style="color: var(--color-text-muted);"

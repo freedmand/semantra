@@ -12,7 +12,21 @@
 
 use std::path::Path;
 
-use pdfium_render::prelude::{Pdfium, PdfiumError};
+use pdfium_render::prelude::{PdfRenderConfig, Pdfium, PdfiumError};
+use semantra_embed::media::image::Rgb8;
+
+/// Serializes every PDFium call in the process. PDFium is not re-entrant:
+/// concurrent use from several threads (indexing renders pages while the UI
+/// asks for highlights, thumbnails or page text) corrupts its global state —
+/// observed as spurious `FormatError`s on valid files, and as outright crashes.
+/// pdfium-render's `thread_safe` feature does not cover this, so each helper
+/// below holds this lock for the whole open-document-and-read operation.
+static PDFIUM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn pdfium_lock() -> std::sync::MutexGuard<'static, ()> {
+    // A panic while holding the lock leaves PDFium usable; ignore poisoning.
+    PDFIUM_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Re-exported so callers (and integration tests) can name the shared PDFium
 /// handle type without depending on `pdfium-render` directly.
@@ -48,9 +62,10 @@ pub fn load_library(lib_dir: &Path) -> Result<Pdfium, String> {
 /// these into windows; keeping raw per-page text here lets each chunk record
 /// which page it came from.
 pub fn extract_pdf_pages(pdfium: &Pdfium, pdf_path: &str) -> Result<Vec<String>, String> {
+    let _guard = pdfium_lock();
     let document = pdfium
         .load_pdf_from_file(pdf_path, None)
-        .map_err(|e| format!("open PDF {pdf_path}: {}", describe(e)))?;
+        .map_err(|e| format!("Couldn't open this PDF: {}", describe(e)))?;
 
     let pages = document.pages();
     let mut out = Vec::with_capacity(pages.len() as usize);
@@ -104,9 +119,10 @@ pub struct PageChars {
 /// selects a slice of `chars`, whose union (per text line) becomes the highlight
 /// rectangles overlaid on the PDF.js-rendered page.
 pub fn page_chars(pdfium: &Pdfium, pdf_path: &str, page_index: usize) -> Result<PageChars, String> {
+    let _guard = pdfium_lock();
     let document = pdfium
         .load_pdf_from_file(pdf_path, None)
-        .map_err(|e| format!("open PDF {pdf_path}: {}", describe(e)))?;
+        .map_err(|e| format!("Couldn't open this PDF: {}", describe(e)))?;
     let pages = document.pages();
     let page = pages
         .get(page_index as i32)
@@ -139,8 +155,52 @@ pub fn page_chars(pdfium: &Pdfium, pdf_path: &str, page_index: usize) -> Result<
     })
 }
 
-/// Human-readable description for a [`PdfiumError`]; its `Display` is terse so we
-/// keep this in one place.
+/// A user-facing description of a PDFium error (shown in the manage view, so
+/// no internal paths), with the raw variant kept for bug reports.
 fn describe(e: PdfiumError) -> String {
-    format!("{e:?}")
+    use pdfium_render::prelude::PdfiumInternalError as I;
+    let raw = format!("{e:?}");
+    let friendly = match &e {
+        PdfiumError::PdfiumLibraryInternalError(I::PasswordError) => "it is password-protected",
+        PdfiumError::PdfiumLibraryInternalError(I::FormatError) => "the file is damaged or not a valid PDF",
+        PdfiumError::PdfiumLibraryInternalError(I::FileError) => "the file could not be read",
+        PdfiumError::PdfiumLibraryInternalError(I::SecurityError) => "it uses unsupported security settings",
+        _ => return raw,
+    };
+    format!("{friendly} ({raw})")
+}
+
+/// Render page `page_index` to RGB with its longer side at `max_side` pixels.
+pub fn render_page(pdfium: &Pdfium, pdf_path: &str, page_index: usize, max_side: u32) -> Result<Rgb8, String> {
+    render_pages(pdfium, pdf_path, &[page_index], max_side)?
+        .pop()
+        .ok_or_else(|| format!("render page {}: no output", page_index + 1))
+}
+
+/// Render several pages with the document opened once (opening a large PDF
+/// costs ~100+ ms, so per-page reopening dominates indexing otherwise). Each
+/// page is scaled so its longer side is `max_side` pixels — up or down;
+/// PDFium's default is 72 dpi (a letter page would be only 612×792).
+pub fn render_pages(pdfium: &Pdfium, pdf_path: &str, pages: &[usize], max_side: u32) -> Result<Vec<Rgb8>, String> {
+    let _guard = pdfium_lock();
+    let document = pdfium
+        .load_pdf_from_file(pdf_path, None)
+        .map_err(|e| format!("Couldn't open this PDF: {}", describe(e)))?;
+    let all = document.pages();
+    pages
+        .iter()
+        .map(|&page_index| {
+            let page = all
+                .get(page_index as i32)
+                .map_err(|e| format!("load page {}: {}", page_index + 1, describe(e)))?;
+            let longest = page.width().value.max(page.height().value).max(1.0);
+            let config = PdfRenderConfig::new().scale_page_by_factor(max_side as f32 / longest);
+            let bitmap = page
+                .render_with_config(&config)
+                .map_err(|e| format!("render page {}: {}", page_index + 1, describe(e)))?;
+            let (width, height) = (bitmap.width() as u32, bitmap.height() as u32);
+            let data = bitmap.as_rgba_bytes().chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+            Ok(Rgb8 { width, height, data })
+        })
+        .collect()
 }

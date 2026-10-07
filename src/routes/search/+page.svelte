@@ -1,7 +1,8 @@
 <script lang="ts">
   // The launched project workspace: header + search bar, file-grouped results
   // sidebar with relevance feedback, document tabs, and a reader (ProseMirror
-  // for text, PDF.js for PDFs) that highlights the matched passage. Reachable at
+  // for text, PDF.js for PDFs, a zoomable image viewer, an audio/video player
+  // with a hit-marked timeline) that shows the matched passage/page/moment. Reachable at
   // `/search?id=<uuid>`. All state lives in appState.search; live indexing updates
   // (new tabs as documents finish) arrive via the root layout's subscription.
   //
@@ -11,6 +12,7 @@
   import { onMount, tick } from "svelte";
   import { goto } from "$app/navigation";
   import { getDocumentText, type ProjectHit } from "$lib/project/projectClient";
+  import { bestMatchRange } from "$lib/embedding/highlight";
   import { appState, loadSearch, runSearch } from "$lib/state.svelte";
   import SearchBar from "$lib/project/SearchBar.svelte";
   import SearchResults from "$lib/project/SearchResults.svelte";
@@ -18,6 +20,8 @@
   import TextView from "$lib/project/TextView.svelte";
   import PdfViewer from "$lib/project/PdfViewer.svelte";
   import CsvViewer from "$lib/project/CsvViewer.svelte";
+  import ImageViewer from "$lib/project/ImageViewer.svelte";
+  import MediaPlayer from "$lib/project/MediaPlayer.svelte";
   import IndexProgressBar from "$lib/project/IndexProgressBar.svelte";
   import SemantraLogo from "$lib/SemantraLogo.svelte";
 
@@ -26,14 +30,55 @@
   let textViewRef = $state<any>(null);
   let pdfViewerRef = $state<any>(null);
   let csvViewerRef = $state<any>(null);
+  let imageViewerRef = $state<any>(null);
+  let mediaPlayerRef = $state<any>(null);
+
+  /**
+   * The part of a text hit to highlight in the reader: its strongest matching
+   * window once the explanation has arrived (chunks are ~250 tokens, so the
+   * whole chunk is a large block), else the whole chunk. Offsets relative to
+   * the chunk start.
+   */
+  function focusRange(hit: ProjectHit): [number, number] {
+    const whole: [number, number] = [0, hit.charEnd - hit.charStart];
+    const exp = search.explanations[hit.index];
+    if (hit.modality !== "text" || !exp) return whole;
+    const best = bestMatchRange(hit.text, exp);
+    return best ? toSentences(hit.text, best) : whole;
+  }
+
+  /** Grow a char range to the sentence(s) containing it (≤ ~400 chars). */
+  function toSentences(text: string, [from, to]: [number, number]): [number, number] {
+    const chars = Array.from(text); // offsets are in code points
+    const isEnd = (i: number) => /[.!?]/.test(chars[i]) && (i + 1 >= chars.length || /\s/.test(chars[i + 1]));
+    let a = from;
+    while (a > 0 && from - a < 250 && !isEnd(a - 1)) a--;
+    while (a < from && /\s/.test(chars[a])) a++;
+    let b = to;
+    while (b < chars.length && b - to < 250 && !isEnd(b - 1)) b++;
+    return b - a > 450 ? [from, to] : [a, b];
+  }
 
   function tryNavigate() {
     const hit = search.pendingNav;
     const activeDoc = appState.searchActiveDoc;
     if (!hit || !activeDoc || activeDoc.sha512 !== hit.sha512) return;
+    const [from, to] = focusRange(hit);
     if (activeDoc.filetype === "pdf") {
       if (!pdfViewerRef) return;
-      pdfViewerRef.navigate(hit.page ?? 0, hit.pageCharStart, hit.charEnd - hit.charStart);
+      // A page-render (visual) hit has no text span: go to the page, no highlight.
+      const length = hit.modality === "image" ? 0 : to - from;
+      pdfViewerRef.navigate(hit.page ?? 0, hit.pageCharStart + from, length);
+      search.pendingNav = null;
+    } else if (activeDoc.filetype === "image") {
+      if (!imageViewerRef) return;
+      imageViewerRef.navigate();
+      search.pendingNav = null;
+    } else if (activeDoc.filetype === "audio" || activeDoc.filetype === "video") {
+      if (!mediaPlayerRef) return;
+      if (hit.timeStartMs != null && hit.timeEndMs != null) {
+        mediaPlayerRef.navigate(hit.timeStartMs, hit.timeEndMs);
+      }
       search.pendingNav = null;
     } else if (activeDoc.filetype === "csv") {
       if (!csvViewerRef) return;
@@ -44,7 +89,7 @@
       // `textViewRef` only binds once the `{#await}` resolves and `TextView`
       // mounts, so its presence already means the text is loaded.
       if (!textViewRef) return;
-      textViewRef.navigate(hit.charStart, hit.charEnd);
+      textViewRef.navigate(hit.charStart + from, hit.charStart + to);
       search.pendingNav = null;
     }
   }
@@ -125,6 +170,22 @@
               {:then text}
                 <TextView bind:this={textViewRef} {text} />
               {/await}
+            {/key}
+          </div>
+        {:else if activeDoc.filetype === "image"}
+          <div class="flex-1 min-h-0">
+            {#key activeDoc.sha512}
+              <ImageViewer bind:this={imageViewerRef} sha512={activeDoc.sha512} />
+            {/key}
+          </div>
+        {:else if activeDoc.filetype === "audio" || activeDoc.filetype === "video"}
+          <div class="flex-1 min-h-0">
+            {#key activeDoc.sha512}
+              <MediaPlayer
+                bind:this={mediaPlayerRef}
+                sha512={activeDoc.sha512}
+                kind={activeDoc.filetype}
+              />
             {/key}
           </div>
         {:else if activeDoc.filetype === "csv"}

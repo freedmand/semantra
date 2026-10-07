@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use semantra_lib::chunk::{Chunker, WordWindowChunker};
+use semantra_lib::chunk::{Chunker, TokenWindowChunker};
 use semantra_lib::{extract, pdf};
 
 fn fixture() -> Option<String> {
@@ -40,7 +40,20 @@ fn chunk_offsets_align_with_pdfium_char_boxes() {
     let segments = &extracted.segments;
     assert!(!segments.is_empty(), "PDF should have pages");
 
-    let chunks = WordWindowChunker::default().chunk(segments);
+    // Offsets are what's under test, not tokenization: one "token" per
+    // whitespace-delimited word gives the old ~70-word windows.
+    let word_starts = |t: &str| -> Vec<usize> {
+        let mut prev_ws = true;
+        let mut out = Vec::new();
+        for (b, ch) in t.char_indices() {
+            if !ch.is_whitespace() && prev_ws {
+                out.push(b);
+            }
+            prev_ws = ch.is_whitespace();
+        }
+        out
+    };
+    let chunks = TokenWindowChunker::new(70, 8, word_starts).chunk(segments);
     assert!(!chunks.is_empty(), "PDF should produce chunks");
 
     // For each of the first few chunks, the page the chunker saw must match the

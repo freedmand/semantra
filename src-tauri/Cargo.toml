@@ -1,6 +1,6 @@
 [package]
 name = "semantra"
-version = "0.1.4"
+version = "0.2.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -71,13 +71,15 @@ csv = "1"
 # C library in a mutex so it is safe to call from blocking tasks.
 pdfium-render = { version = "0.9", default-features = false, features = ["pdfium_latest", "thread_safe"] }
 
-# mdbr-leaf embedding pipeline (BERT -> mean-pool -> Dense -> L2). Despite the
-# `-ir` in its name it serves whichever leaf model MODEL_NAME selects (mt today).
-# Vendored into the repo at ./leaf-ir-candle so CI (and any fresh checkout) can
-# build without an out-of-tree path. Path dependency so this rarely-changing,
-# candle-heavy crate compiles once and is cached separately from the
-# frequently-rebuilt app code.
-leaf-ir-candle-test = { path = "../leaf-ir-candle" }
+# EmbeddingGemma 2 on MLX (text + image + audio + video into one 768-d space).
+# Path dependency so the MLX build (CMake, ~3 min the first time) is compiled
+# once and cached separately from the frequently-rebuilt app code. Apple
+# Silicon only: MLX is Metal-backed.
+semantra-embed = { path = "../semantra-embed" }
+# Error type returned by inference-thread closures (semantra-embed is anyhow-based).
+anyhow = "1"
+# Thumbnails cross the IPC boundary as `data:image/jpeg;base64,…` URLs.
+base64 = "0.22"
 
 # On-disk vector store for indexed chunks. LanceDB 0.30 has NO default features,
 # so this pulls in only the local embedded store + IVF/HNSW indexes — none of the
@@ -102,33 +104,25 @@ uuid = { version = "1", features = ["v4"] }
 # transitively via LanceDB; declared directly so we can name the types.
 tokio = { version = "1", features = ["sync"] }
 
-# Optimize ALL dependencies (candle, gemm, tokenizers) even in dev/`tauri dev`
-# builds. Without this, candle's matmul kernels run unoptimized and embedding is
-# ~13x slower (9s vs ~0.3s). App code itself stays unoptimized for fast
-# incremental rebuilds and debuggability — only deps pay the one-time opt cost.
+# Optimize ALL dependencies even in dev/`tauri dev` builds — tokenizers and the
+# LanceDB stack are painfully slow unoptimized. App code itself stays
+# unoptimized for fast incremental rebuilds. (MLX's C++/Metal core is built by
+# CMake in Release regardless of the Cargo profile.)
 [profile.dev.package."*"]
 opt-level = 3
 
-# Aggressive size-optimized release. The shipped binary is dominated by the
+# Size-optimized release. The shipped binary is dominated by the
 # LanceDB/DataFusion/Arrow/sqlparser stack (a full columnar SQL engine pulled in
-# for the vector store) — NOT the ML runtime — so squeezing dependency code is
-# the lever. Combined effect of these four: ~183MB -> see below.
-#
-# NOTE: opt-level here only governs the LanceDB stack, which a phase-breakdown
-# benchmark (tests/index_bench.rs) showed is just ~2-5% of indexing time — the
-# rest is embedding (candle/Metal, exempted to opt-3 below). So "z" costs almost
-# nothing on speed and keeps the binary small; don't raise it expecting a
-# search/indexing win (it won't move — fix the embedding path instead).
+# for the vector store) — NOT the ML runtime, whose hot path is MLX's
+# CMake-built C++/Metal (unaffected by these flags). So squeezing Rust code size
+# costs nothing on embedding speed.
 #
 #   opt-level = "z"     optimize for size over speed (smallest codegen)
 #   lto = "fat"         whole-program inlining + cross-crate dead-code elimination
 #   codegen-units = 1   no parallel-codegen duplication; maximizes LTO's reach
-#   strip = true        drop the ~33MB symbol table (__LINKEDIT)
+#   strip = true        drop the symbol table (__LINKEDIT)
 #   panic = "abort"     no unwind tables/landing pads. NOTE: a panic now aborts
-#                       the process instead of unwinding; drop this flag if you
-#                       see hard crashes where an error was previously caught.
-#                       (Cargo still builds test/bench harnesses with unwind, so
-#                       `cargo test --release` is unaffected.)
+#                       the process instead of unwinding.
 [profile.release]
 opt-level = "z"
 lto = "fat"
@@ -136,44 +130,13 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
-# Exempt the embedding hot path from size optimization: "z" guts matmul
-# throughput (see the dev-profile note above — ~13x), and these crates are a
-# tiny slice of the binary, so keeping them at opt-level 3 costs little size and
-# preserves embedding speed.
-[profile.release.package.candle-core]
-opt-level = 3
-[profile.release.package.candle-nn]
-opt-level = 3
-[profile.release.package.candle-transformers]
-opt-level = 3
-[profile.release.package.candle-metal-kernels]
-opt-level = 3
-[profile.release.package.gemm]
-opt-level = 3
-[profile.release.package.gemm-common]
-opt-level = 3
-[profile.release.package.gemm-f16]
-opt-level = 3
-[profile.release.package.gemm-f32]
-opt-level = 3
-[profile.release.package.gemm-f64]
-opt-level = 3
-[profile.release.package.gemm-c32]
-opt-level = 3
-[profile.release.package.gemm-c64]
-opt-level = 3
-[profile.release.package.half]
-opt-level = 3
-[profile.release.package.matrixmultiply]
+# The tokenizer runs on every chunk and query; keep it at full speed.
+[profile.release.package.tokenizers]
 opt-level = 3
 
 # Vendored fix for lance-linalg 7.0.0: its build.rs compiles the AVX-512
-# dist_table.c kernel with `-march=native`, which fails when cross-compiling the
-# x86_64 slice on an arm64 macOS runner (our universal build) — "unknown target
-# CPU 'apple-m2'" — leaving `sum_4bit_dist_table_32bytes_batch_avx512` undefined
-# at link time. The vendored copy uses an explicit `-march=skylake-avx512` so the
-# kernel compiles for the x86_64 target on any host. The kernel is runtime-gated
-# (SIMD_SUPPORT detection), so it's only executed on AVX-512-capable CPUs.
+# dist_table.c kernel with `-march=native`. Harmless on Apple Silicon (the
+# kernel is x86-only and runtime-gated), but kept so the dependency resolves
+# identically; drop once upstream fixes the flag.
 [patch.crates-io]
 lance-linalg = { path = "vendor/lance-linalg" }
-

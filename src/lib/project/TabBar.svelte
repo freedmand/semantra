@@ -4,6 +4,16 @@
   import { appState } from "$lib/state.svelte";
 
   const search = appState.search;
+
+  /** A small type glyph so mixed media projects scan at a glance. */
+  const glyph: Record<string, string> = {
+    pdf: "▤",
+    text: "¶",
+    csv: "▦",
+    image: "▣",
+    audio: "♪",
+    video: "▶",
+  };
 </script>
 
 <div
@@ -22,7 +32,9 @@
             : 'transparent'};"
           onclick={() => (search.activeIndex = i)}
         >
-          {doc.basename}
+          <span class="mr-1" style="color: var(--color-text-dim);" aria-hidden="true"
+            >{glyph[doc.filetype] ?? ""}</span
+          >{doc.basename}
         </button>
       {/each}
     </div>

@@ -1,10 +1,10 @@
 //! Indexing phase-breakdown benchmark — answers "where does indexing time go?"
-//! by running the REAL pipeline pieces the worker uses (`embed_sentences` on the
+//! by running the REAL pipeline pieces the worker uses (`Model::embed_texts` on the
 //! bundled model, then `VectorStore::insert` + `maintain` on a temp LanceDB) and
 //! timing each phase separately.
 //!
 //! It deliberately isolates the two big costs so we can see LanceDB's share:
-//!   • EMBED   — candle/Metal inference, batched 32 like `embed::BATCH_SIZE`
+//!   • EMBED   — MLX/Metal inference, batched like the worker (BENCH_BATCH rows)
 //!   • INSERT  — LanceDB appends, batched 1024 like `lib::INSERT_BATCH`
 //!   • MAINTAIN— LanceDB ANN (IVF-HNSW-SQ) + FTS index build + compaction
 //!
@@ -12,7 +12,6 @@
 //!   BENCH=1                 enable the bench
 //!   BENCH_N=<n>             corpus size in chunks (default 5000)
 //!   BENCH_SKIP_STORE=1      embed only — no insert/maintain (clean embed timing)
-//!   LEAF_IR_DEVICE=cpu|metal  force the embed device (prints which it used)
 //!
 //! Run (dev profile — deps already opt-3 via [profile.dev.package."*"]):
 //!   BENCH=1 cargo test --test index_bench -- --nocapture
@@ -22,14 +21,14 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use leaf_ir_candle_test::{embed_sentences, setup_model, warmup};
-use semantra_lib::store::{ChunkRow, VectorStore};
+use semantra_embed::{document_prompt, Model};
+use semantra_lib::store::{ChunkRow, Modality, VectorStore};
 
 // Mirror the production constants (the modules that own them aren't public).
-// BATCH_SIZE is overridable via BENCH_BATCH to sweep the Metal-dispatch tradeoff.
-const BATCH_SIZE: usize = 32; // embed::BATCH_SIZE (production default)
+// BATCH_SIZE is overridable via BENCH_BATCH; 64 × ~265 tokens ≈ embed::BATCH_TOKENS.
+const BATCH_SIZE: usize = 64;
 const INSERT_BATCH: usize = 1024; // lib::INSERT_BATCH
-const CHUNK_WORDS: usize = 50; // lib::DEFAULT_CHUNK_SIZE
+const CHUNK_WORDS: usize = 190; // ≈ lib::CHUNK_TOKENS (256) of this vocabulary
 
 /// A small, varied vocabulary so tokenization isn't degenerate (all-identical
 /// tokens would mis-estimate real throughput). ~80 common English words.
@@ -91,12 +90,13 @@ async fn index_phase_breakdown() {
     let skip_store = std::env::var("BENCH_SKIP_STORE").is_ok();
 
     // Load the active model the same way the app does in dev.
-    let model_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/mdbr-leaf-mt");
-    let ctx = setup_model(&model_dir).expect("load bundled mdbr-leaf-mt model");
-    let dim = ctx.embedding_dim();
-    warmup(&ctx).expect("warmup"); // compiles Metal pipelines off the clock
+    let model_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/embeddinggemma-2");
+    let model = Model::load(&model_dir, 768).expect("load bundled embeddinggemma-2 model");
+    let dim = model.embedding_dim();
+    model.warmup().expect("warmup"); // compiles Metal pipelines off the clock
 
-    let corpus = synth_corpus(n);
+    let prompt = document_prompt(None);
+    let corpus: Vec<String> = synth_corpus(n).into_iter().map(|t| format!("{prompt}{t}")).collect();
     let total_words = n * CHUNK_WORDS;
     eprintln!(
         "\n=== index bench: {n} chunks (~{CHUNK_WORDS} words each, {total_words} words), dim {dim}, skip_store={skip_store} ===",
@@ -106,7 +106,7 @@ async fn index_phase_breakdown() {
     let t_embed = Instant::now();
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(n);
     for batch in corpus.chunks(batch_size) {
-        let emb = embed_sentences(&ctx, batch).expect("embed batch");
+        let emb = model.embed_texts(batch).expect("embed batch");
         vectors.extend(emb.rows);
     }
     let embed_ms = t_embed.elapsed().as_secs_f64() * 1000.0;
@@ -128,11 +128,14 @@ async fn index_phase_breakdown() {
         .enumerate()
         .map(|(i, (text, vector))| ChunkRow {
             sha512: "bench".into(),
+            modality: Modality::Text,
             text: text.clone(),
             char_start: i as i64,
             char_end: (i + text.len()) as i64,
             page: None,
             page_char_start: 0,
+            time_start_ms: None,
+            time_end_ms: None,
             pipeline_version: "bench".into(),
             vector,
         })

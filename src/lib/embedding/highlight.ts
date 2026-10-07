@@ -80,7 +80,8 @@ interface Span {
 
 /**
  * Below this |bias| we treat the model as having emitted no constant term. Some
- * heads (e.g. mdbr-leaf-mt) have no Dense bias, so the exact decomposition has
+ * heads (e.g. EmbeddingGemma 2's per-token projection, or the older
+ * mdbr-leaf-mt) have no bias, so the exact decomposition has
  * nothing to absorb the baseline every token shares — all contributions land on
  * the same side of zero and the diverging green/red color collapses to one hue.
  * Models that DO carry a bias (e.g. mdbr-leaf-ir, ~0.13) need no compensation.
@@ -321,6 +322,45 @@ function topScoringSpans(
     out.push({ start: bestStart, end: bestEnd });
   }
   return out.sort((a, b) => a.start - b.start);
+}
+
+/**
+ * The character range (within `text`) of the single strongest highlight
+ * window — the same window {@link toSegments} paints most vividly — or `null`
+ * when nothing is positive. Readers use it to highlight just the matching
+ * passage of a long chunk instead of the whole chunk.
+ */
+export function bestMatchRange(
+  text: string,
+  explanation: Explanation,
+  options: HighlightOptions = DEFAULT_HIGHLIGHT,
+): [number, number] | null {
+  const bytes = new TextEncoder().encode(text);
+  const spans = aggregate(bytes, explanation.tokens, options.granularity);
+  if (spans.length === 0) return null;
+  const tokenTotal = spans.reduce((n, s) => n + s.tokens, 0);
+  const scoreTotal = spans.reduce((a, s) => a + s.score, 0);
+  const baseline =
+    Math.abs(explanation.bias) < BIAS_EPSILON && tokenTotal > 0 ? scoreTotal / tokenTotal : 0;
+  const colorScore = (s: Span) => Math.max(s.score - s.tokens * baseline, 0);
+  const maxPos = spans.reduce((m, s) => Math.max(m, colorScore(s)), 0);
+  if (maxPos <= 0) return null;
+  const points = spans.map((s) => {
+    const sev = clamp(colorScore(s) / maxPos, 0, 1);
+    return sev > 0 ? GREEN_BASE + sev : -GAP_PENALTY;
+  });
+  const [best] = topScoringSpans(
+    points,
+    1,
+    MIN_SPAN_WORDS,
+    SHORT_WORD_PENALTY,
+    MAX_SPAN_WORDS,
+    LONG_WORD_PENALTY,
+  );
+  if (!best) return null;
+  // Byte offsets -> character (code point) offsets, the unit chunk offsets use.
+  const chars = (byte: number) => Array.from(decoder.decode(bytes.subarray(0, byte))).length;
+  return [chars(spans[best.start].start), chars(spans[best.end - 1].end)];
 }
 
 export function toSegments(

@@ -38,7 +38,7 @@
       class="bg-white py-2 px-4 pl-12 font-mono w-full rounded-sm border"
       class:outdated
       style="color:#0f0f0f; border-color: var(--color-border);"
-      placeholder="Search"
+      placeholder="Search — describe a passage, image, sound or scene"
       autocorrect="off"
       autocapitalize="off"
       autocomplete="off"

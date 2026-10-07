@@ -1,12 +1,14 @@
 <script lang="ts">
   // One search result row: score badge, +/- relevance-feedback buttons, and the
-  // (optionally highlighted) snippet. Clicking the row navigates into the doc.
+  // (optionally highlighted) snippet — or, for image/audio/video/page-render
+  // hits, a preview. Clicking the row navigates into the doc.
   // Per-row data (`hit`, `explanation`) comes in as props; preference state and
   // the navigate/set-preference actions come from the central appState.
   import type { Explanation } from "$lib/embedding/search";
   import type { ProjectHit } from "./projectClient";
   import { appState, setPreference, jumpToResult, scorePercent } from "$lib/state.svelte";
   import SearchResultText from "./SearchResultText.svelte";
+  import MediaThumb from "./MediaThumb.svelte";
 
   let {
     hit,
@@ -63,6 +65,15 @@
         : "background:#d1d5db;"}
       onclick={(e) => setPref(e, preference < 0 ? 0 : -1)}>-</button
     >
-    <SearchResultText text={hit.text} {explanation} />
+    {#if hit.modality === "text"}
+      {#if hit.filetype === "pdf" && hit.page != null}
+        <span class="text-xs px-1 rounded-sm mr-1" style="background: var(--color-bg-hover); color: var(--color-text-muted);"
+          >p. {hit.page + 1}</span
+        >
+      {/if}
+      <SearchResultText text={hit.text} {explanation} />
+    {:else}
+      <MediaThumb {hit} />
+    {/if}
   </div>
 </li>

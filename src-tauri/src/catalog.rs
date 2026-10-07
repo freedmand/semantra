@@ -429,6 +429,17 @@ impl Catalog {
         self.update_job_status(project_id, sha512, JOB_PENDING, "").await
     }
 
+    /// Flip every errored job back to pending. Called when the pipeline
+    /// changes: a new pipeline is exactly when an old failure may no longer
+    /// apply. Returns how many were retried.
+    pub async fn retry_failed_jobs(&self) -> Result<usize, String> {
+        let failed = read_jobs(&self.scan(&self.index_jobs, Some(format!("status = '{JOB_ERROR}'"))).await?);
+        for j in &failed {
+            self.set_job_pending(&j.project_id, &j.sha512).await?;
+        }
+        Ok(failed.len())
+    }
+
     /// Rewrite a job row's `status`/`error` (delete + re-append, preserving the
     /// rest). No-op if the job no longer exists.
     async fn update_job_status(

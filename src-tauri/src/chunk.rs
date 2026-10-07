@@ -8,10 +8,12 @@
 //! [`Chunk`]s, each carrying offsets back into the canonical full text so a
 //! search hit can be mapped to its exact source location for highlighting.
 //!
-//! The default [`WordWindowChunker`] makes fixed-size word windows **within a
-//! single segment** (so a chunk never straddles a page boundary) with a small
-//! rewind/overlap between consecutive windows, so a passage split across a
-//! window edge still appears whole in one chunk.
+//! The default [`TokenWindowChunker`] makes windows of a fixed **token** budget
+//! (as counted by the embedding model's tokenizer) **within a single segment**
+//! (so a chunk never straddles a page boundary), with a small rewind/overlap
+//! between consecutive windows so a passage split across a window edge still
+//! appears whole in one chunk. Windows always start and end on word boundaries,
+//! so chunk text is a verbatim span of the source.
 
 /// A contiguous run of source text with a known position in the document's
 /// canonical full text. Chunkers never merge across segments, so segment
@@ -25,7 +27,7 @@ pub struct Segment {
     /// index instead — the reader navigates by (row, col), not by page.
     pub page: Option<usize>,
     /// 0-based column index when the source is tabular (CSV); `None` otherwise.
-    /// Only [`CellChunker`] reads it; [`WordWindowChunker`] ignores it.
+    /// Only [`CellChunker`] reads it; [`TokenWindowChunker`] ignores it.
     pub col: Option<usize>,
     /// Char offset of this segment's first char within the canonical full text.
     pub base_offset: usize,
@@ -83,31 +85,35 @@ pub trait Chunker {
     fn chunk(&self, segments: &[Segment]) -> Vec<Chunk>;
 }
 
-/// Fixed word-count windows within each segment, with a configurable rewind
-/// (overlap) between windows.
-#[derive(Clone, Copy, Debug)]
-pub struct WordWindowChunker {
-    /// Words per window.
+/// Token-budgeted windows within each segment, snapped to word boundaries.
+///
+/// `token_starts(text)` returns the byte offset at which each of the model's
+/// tokens for `text` begins (no special tokens). Each token is charged to the
+/// word it begins in — or, for the model's leading-space pieces (`▁word`), to
+/// the word that follows the whitespace. Windows then greedily take whole words
+/// while the token sum stays within `size`, and the next window rewinds by up
+/// to `overlap` tokens of whole words.
+///
+/// A single "word" longer than `size` tokens (minified code, base64, a URL
+/// wall) is hard-split at token boundaries so no window can exceed the budget.
+pub struct TokenWindowChunker<F: Fn(&str) -> Vec<usize>> {
+    /// Max tokens per window (excluding the document prompt and specials).
     pub size: usize,
-    /// Words of rewind shared between consecutive windows (`< size`).
+    /// Tokens of rewind shared between consecutive windows (`< size`).
     pub overlap: usize,
+    token_starts: F,
 }
 
-impl WordWindowChunker {
-    pub fn new(size: usize, overlap: usize) -> Self {
+impl<F: Fn(&str) -> Vec<usize>> TokenWindowChunker<F> {
+    pub fn new(size: usize, overlap: usize, token_starts: F) -> Self {
         let size = size.max(1);
         // Overlap must be strictly less than size or the window never advances.
         let overlap = overlap.min(size - 1);
-        WordWindowChunker { size, overlap }
-    }
-}
-
-impl Default for WordWindowChunker {
-    fn default() -> Self {
-        // 70-word windows with an 8-word rewind: matches the default chunk size
-        // while adding light overlap so passages near a window edge still surface
-        // whole.
-        WordWindowChunker::new(70, 8)
+        TokenWindowChunker {
+            size,
+            overlap,
+            token_starts,
+        }
     }
 }
 
@@ -152,30 +158,88 @@ fn words_with_offsets(text: &str) -> Vec<WordPos> {
     words
 }
 
-impl Chunker for WordWindowChunker {
-    fn chunk(&self, segments: &[Segment]) -> Vec<Chunk> {
-        let step = (self.size - self.overlap).max(1);
-        let mut out = Vec::new();
+/// Charge every token start to a word: word `i` owns the starts before its
+/// `byte_end` not owned by an earlier word (so a leading-space piece in the gap
+/// belongs to the word after it). Words costing more than `max` tokens are
+/// split at token starts into pieces of at most `max`. Returns the (possibly
+/// split) words with their token costs (each at least 1).
+fn costed_words(text: &str, starts: &[usize], max: usize) -> Vec<(WordPos, usize)> {
+    let mut out = Vec::new();
+    let mut t = 0usize; // next unowned index into `starts`
+    for w in words_with_offsets(text) {
+        let first = t;
+        while t < starts.len() && starts[t] < w.byte_end {
+            t += 1;
+        }
+        let owned = &starts[first..t];
+        if owned.len() <= max {
+            out.push((w, owned.len().max(1)));
+            continue;
+        }
+        // Hard-split an oversized word every `max` tokens. Cut points are
+        // clamped into the word and kept on char boundaries so each piece is a
+        // verbatim, non-empty slice.
+        let cuts = owned
+            .iter()
+            .step_by(max)
+            .skip(1)
+            .map(|&b| b.clamp(w.byte_start, w.byte_end))
+            .filter(|&b| text.is_char_boundary(b));
+        let (mut piece_start, mut piece_char, mut charged) = (w.byte_start, w.char_start, 0);
+        for b in cuts.chain(std::iter::once(w.byte_end)) {
+            if b <= piece_start {
+                continue;
+            }
+            let chars = text[piece_start..b].chars().count();
+            // Cumulative so the first piece also pays for the leading-space
+            // token that starts in the gap before the word.
+            let upto = owned.iter().filter(|&&s| s < b).count();
+            let cost = upto - charged;
+            charged = upto;
+            out.push((
+                WordPos {
+                    char_start: piece_char,
+                    char_end: piece_char + chars,
+                    byte_start: piece_start,
+                    byte_end: b,
+                },
+                cost.max(1),
+            ));
+            piece_start = b;
+            piece_char += chars;
+        }
+    }
+    out
+}
 
+impl<F: Fn(&str) -> Vec<usize>> Chunker for TokenWindowChunker<F> {
+    fn chunk(&self, segments: &[Segment]) -> Vec<Chunk> {
+        let mut out = Vec::new();
         for seg in segments {
-            let words = words_with_offsets(&seg.text);
+            let words = costed_words(&seg.text, &(self.token_starts)(&seg.text), self.size);
             let n = words.len();
             if n == 0 {
                 continue;
             }
+            // cum[i] = tokens in words[..i]
+            let mut cum = Vec::with_capacity(n + 1);
+            cum.push(0usize);
+            for (_, c) in &words {
+                cum.push(cum[cum.len() - 1] + c);
+            }
             let mut start = 0usize;
             loop {
-                let end = (start + self.size).min(n);
-                let first = &words[start];
-                let last = &words[end - 1];
+                // Largest end keeping the window within budget (>= 1 word).
+                let mut end = start + 1;
+                while end < n && cum[end + 1] - cum[start] <= self.size {
+                    end += 1;
+                }
+                let (first, last) = (&words[start].0, &words[end - 1].0);
                 // Verbatim slice from the first word's start to the last word's
-                // end: interior whitespace (tabs, newlines, runs of spaces) is
-                // preserved, so `text` is exactly char_slice(full_text,
-                // char_start, char_end). Leading/trailing whitespace outside the
-                // window is excluded because the window is bounded by words.
-                let text = seg.text[first.byte_start..last.byte_end].to_string();
+                // end: interior whitespace is preserved, so `text` is exactly
+                // char_slice(full_text, char_start, char_end).
                 out.push(Chunk {
-                    text,
+                    text: seg.text[first.byte_start..last.byte_end].to_string(),
                     char_start: seg.base_offset + first.char_start,
                     char_end: seg.base_offset + last.char_end,
                     page: seg.page,
@@ -184,7 +248,13 @@ impl Chunker for WordWindowChunker {
                 if end == n {
                     break;
                 }
-                start += step;
+                // Rewind: the earliest next start sharing <= `overlap` tokens
+                // with this window, while still advancing at least one word.
+                let mut next = end;
+                while next - 1 > start && cum[end] - cum[next - 1] <= self.overlap {
+                    next -= 1;
+                }
+                start = next;
             }
         }
         out
@@ -226,32 +296,84 @@ mod tests {
         s.chars().skip(start).take(end - start).collect()
     }
 
+    /// Fake tokenizer: one token per word, starting at the word — makes token
+    /// budgets equal word counts.
+    fn word_starts(text: &str) -> Vec<usize> {
+        words_with_offsets(text).iter().map(|w| w.byte_start).collect()
+    }
+
+    /// Fake Gemma-style tokenizer: each word is a `▁word` piece starting at the
+    /// preceding space (except the first word), plus a token per extra 4 bytes.
+    fn gemma_like(text: &str) -> Vec<usize> {
+        let mut out = Vec::new();
+        for (i, w) in words_with_offsets(text).iter().enumerate() {
+            out.push(if i == 0 { w.byte_start } else { w.byte_start - 1 });
+            out.extend((w.byte_start + 4..w.byte_end).step_by(4));
+        }
+        out
+    }
+
+    fn windows(size: usize, overlap: usize, text: &str) -> Vec<String> {
+        TokenWindowChunker::new(size, overlap, word_starts)
+            .chunk(&[Segment::flat(text)])
+            .into_iter()
+            .map(|c| c.text)
+            .collect()
+    }
+
     #[test]
-    fn non_overlapping_windows_match_word_size() {
-        let seg = Segment::flat("one two three four five");
-        let chunks = WordWindowChunker::new(2, 0).chunk(&[seg]);
-        let texts: Vec<_> = chunks.iter().map(|c| c.text.as_str()).collect();
-        assert_eq!(texts, vec!["one two", "three four", "five"]);
+    fn non_overlapping_windows_match_token_budget() {
+        assert_eq!(windows(2, 0, "one two three four five"), vec!["one two", "three four", "five"]);
     }
 
     #[test]
     fn offsets_reconstruct_source_span() {
         let text = "alpha beta gamma delta";
-        let chunks = WordWindowChunker::new(2, 0).chunk(&[Segment::flat(text)]);
-        // The full-text span [char_start,char_end) must cover exactly the window's
-        // words verbatim (inter-word whitespace included).
+        let chunks = TokenWindowChunker::new(2, 0, word_starts).chunk(&[Segment::flat(text)]);
         assert_eq!(char_slice(text, chunks[0].char_start, chunks[0].char_end), "alpha beta");
         assert_eq!(char_slice(text, chunks[1].char_start, chunks[1].char_end), "gamma delta");
     }
 
     #[test]
     fn overlap_rewinds_between_windows() {
-        let chunks = WordWindowChunker::new(3, 1).chunk(&[Segment::flat("a b c d e")]);
+        // size 3, overlap 1: [a b c], [c d e]; the shared word is "c".
+        assert_eq!(windows(3, 1, "a b c d e"), vec!["a b c", "c d e"]);
+    }
+
+    #[test]
+    fn leading_space_pieces_charge_the_following_word() {
+        // Under `gemma_like`: "aaaa" = 1, "bbbbbbbb" = 2, "cc" = 1 tokens.
+        let text = "aaaa bbbbbbbb cc";
+        let costs: Vec<usize> = costed_words(text, &gemma_like(text), 99).iter().map(|(_, c)| *c).collect();
+        assert_eq!(costs, vec![1, 2, 1]);
+        let chunks = TokenWindowChunker::new(3, 0, gemma_like).chunk(&[Segment::flat(text)]);
         let texts: Vec<_> = chunks.iter().map(|c| c.text.as_str()).collect();
-        // step = size - overlap = 2: [a b c], [c d e]; the shared word is "c".
-        assert_eq!(texts, vec!["a b c", "c d e"]);
-        assert_eq!(chunks[0].char_end, 5); // "a b c"
-        assert_eq!(chunks[1].char_start, 4); // overlaps into "c"
+        assert_eq!(texts, vec!["aaaa bbbbbbbb", "cc"]);
+    }
+
+    #[test]
+    fn oversized_word_is_hard_split_within_budget() {
+        // One 40-byte "word" = 10 tokens under `gemma_like`; budget 4.
+        let blob = "x".repeat(40);
+        let text = format!("pre {blob} post");
+        let chunks = TokenWindowChunker::new(4, 0, gemma_like).chunk(&[Segment::flat(text.clone())]);
+        let starts = gemma_like(&text);
+        for c in &chunks {
+            let (lo, hi) = (text.char_indices().nth(c.char_start).unwrap().0, text.char_indices().nth(c.char_end - 1).unwrap().0 + 1);
+            let toks = starts.iter().filter(|&&s| s >= lo && s < hi).count();
+            assert!(toks <= 4, "chunk {:?} spans {toks} tokens", c.text);
+            assert_eq!(c.text, char_slice(&text, c.char_start, c.char_end));
+        }
+        let rebuilt: String = chunks.iter().map(|c| c.text.replace(' ', "")).collect();
+        assert_eq!(rebuilt, format!("pre{blob}post"), "pieces cover the blob exactly once");
+    }
+
+    #[test]
+    fn multibyte_oversized_word_splits_on_char_boundaries() {
+        let blob = "é".repeat(30); // 60 bytes; gemma_like cuts every 4 bytes
+        let chunks = TokenWindowChunker::new(3, 0, gemma_like).chunk(&[Segment::flat(blob.clone())]);
+        assert!(chunks.len() > 1);
+        assert_eq!(chunks.iter().map(|c| c.text.as_str()).collect::<String>(), blob);
     }
 
     #[test]
@@ -269,11 +391,10 @@ mod tests {
             col: None,
             base_offset: 14,
         };
-        let chunks = WordWindowChunker::new(10, 0).chunk(&[p0, p1]);
+        let chunks = TokenWindowChunker::new(10, 0, word_starts).chunk(&[p0, p1]);
         assert_eq!(chunks.len(), 2, "each page yields its own chunk");
         assert_eq!(chunks[0].page, Some(0));
         assert_eq!(chunks[0].text, "one two three");
-        assert_eq!(chunks[0].page_char_start, 0);
         assert_eq!(chunks[1].page, Some(1));
         assert_eq!(chunks[1].text, "four five");
         // Global offset uses base_offset; page-relative offset resets per page.
@@ -284,22 +405,24 @@ mod tests {
     #[test]
     fn preserves_interior_whitespace_verbatim() {
         let text = "café\tnaïve\n\n  Σigma";
-        let chunks = WordWindowChunker::new(2, 0).chunk(&[Segment::flat(text)]);
-        // Interior whitespace between words is kept exactly (the tab survives);
-        // the run before the next window's first word is excluded.
+        let chunks = TokenWindowChunker::new(2, 0, word_starts).chunk(&[Segment::flat(text)]);
         assert_eq!(chunks[0].text, "café\tnaïve");
         assert_eq!(chunks[1].text, "Σigma");
-        // chunk.text is exactly the canonical full-text slice it points at.
         assert_eq!(chunks[0].text, char_slice(text, chunks[0].char_start, chunks[0].char_end));
         assert_eq!(char_slice(text, chunks[1].char_start, chunks[1].char_end), "Σigma");
     }
 
     #[test]
     fn empty_and_whitespace_only_segments_yield_nothing() {
-        assert!(WordWindowChunker::default().chunk(&[Segment::flat("")]).is_empty());
-        assert!(WordWindowChunker::default()
-            .chunk(&[Segment::flat("   \n\t ")])
-            .is_empty());
+        assert!(windows(8, 2, "").is_empty());
+        assert!(windows(8, 2, "   \n\t ").is_empty());
+    }
+
+    #[test]
+    fn overlap_is_clamped_below_size() {
+        let c = TokenWindowChunker::new(3, 9, word_starts);
+        assert_eq!(c.overlap, 2);
+        assert!(c.chunk(&[Segment::flat("a b c d e f g")]).len() >= 2, "window still advances");
     }
 
     fn cell(text: &str, page: usize, col: usize, base_offset: usize) -> Segment {
@@ -339,14 +462,5 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "notes: line1\nline2");
         assert_eq!(chunks[0].page_char_start, 1);
-    }
-
-    #[test]
-    fn overlap_is_clamped_below_size() {
-        // overlap >= size would stall; constructor clamps it.
-        let c = WordWindowChunker::new(3, 9);
-        assert_eq!(c.overlap, 2);
-        let chunks = c.chunk(&[Segment::flat("a b c d e f g")]);
-        assert!(chunks.len() >= 2, "window still advances");
     }
 }

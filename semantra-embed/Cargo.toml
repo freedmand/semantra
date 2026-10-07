@@ -1,0 +1,42 @@
+[package]
+name = "semantra-embed"
+version = "0.1.0"
+edition = "2021"
+
+# EmbeddingGemma 2 (google/embeddinggemma-2) on Apple's MLX: a Gemma-4 text
+# backbone plus vision and audio towers that all embed into one shared 768-d
+# space. The model is implemented directly against mlx-rs ops (no nn::Module
+# macros) so per-token states stay reachable for `explain`.
+#
+# Apple Silicon only. MLX is compiled from source by mlx-sys (CMake + the Xcode
+# Metal toolchain: `xcodebuild -downloadComponent MetalToolchain`).
+
+[dependencies]
+mlx-rs = "0.32"
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Runtime-agnostic oneshot + block_on for the inference-thread service.
+futures-channel = "0.3"
+futures-executor = "0.3"
+
+# Native media decoding on macOS: ImageIO (every format Photos/Preview opens,
+# incl. HEIC/RAW, with EXIF orientation) + CoreGraphics for pixel buffers, and
+# a SIMD Catmull-Rom resize matching the reference processor's antialiased
+# bicubic.
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-image-io = "0.3"
+fast_image_resize = "6"
+# AVFoundation for audio/video: decoded, resampled 16 kHz mono PCM and 1 fps
+# frames (with the track's rotation applied), for any container/codec the OS
+# plays (mp3, m4a/AAC, WAV, AIFF, FLAC, MP4/MOV, H.264/HEVC/ProRes, …).
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-av-foundation = { version = "0.3", features = ["objc2-core-media", "objc2-core-graphics"] }
+objc2-core-media = "0.3"
+
+[dev-dependencies]
+# Reads the 16-bit PCM WAV fixtures in the golden parity tests.
+hound = "3"

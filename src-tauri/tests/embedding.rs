@@ -1,64 +1,42 @@
-// Oracle check for the bundled model files, loaded the same way the app resolves
-// them in dev (relative to CARGO_MANIFEST_DIR). This guards against a corrupted
-// copy and against the move breaking the pipeline: if the published model-card
-// similarity drifts from 0.6857, something is wrong.
+// Sanity check for the bundled EmbeddingGemma 2 files, loaded the same way the
+// app resolves them in dev (relative to CARGO_MANIFEST_DIR): 768-d unit vectors,
+// query/document prompts applied, and an on-topic passage outranking an
+// off-topic one. Numerical parity with the FP32 PyTorch reference lives in
+// semantra-embed's golden tests.
 //
-// The oracle value is specific to mdbr-leaf-ir, so this test names that model
-// directly rather than following the app's `MODEL_NAME` switch.
-//
-// Run with: cargo test --release
+// Skips when the (gitignored, ~1.5 GB) weights haven't been fetched.
+// Run with: cargo test --release --test embedding
 
 use std::path::PathBuf;
 
-use leaf_ir_candle_test::{embed_sentences, setup_model, QUERY_PREFIX};
+use semantra_embed::{document_prompt, Model, QUERY_PREFIX};
 
 #[test]
-fn bundled_model_reproduces_oracle() {
-    let model_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/mdbr-leaf-ir");
-    let ctx = setup_model(&model_dir).expect("load bundled model files");
+fn bundled_model_is_768d_and_ranks_sanely() {
+    let model_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/embeddinggemma-2");
+    if !model_dir.join("model.safetensors").exists() {
+        eprintln!("models/embeddinggemma-2 not fetched; skipping (run ./fetch-model.sh)");
+        return;
+    }
+    let model = Model::load(&model_dir, 768).expect("load bundled model files");
+    let doc = document_prompt(None);
 
-    let query = format!("{QUERY_PREFIX}What is machine learning?");
-    let doc = "Machine learning is a subset of artificial intelligence that focuses on algorithms that can learn from data.".to_string();
+    let q = model
+        .embed_texts(&[format!("{QUERY_PREFIX}What is machine learning?")])
+        .expect("embed query");
+    let d = model
+        .embed_texts(&[
+            format!("{doc}Machine learning is a subset of artificial intelligence that learns from data."),
+            format!("{doc}The central bank raised interest rates to curb rising inflation."),
+        ])
+        .expect("embed docs");
 
-    let q = embed_sentences(&ctx, &[query]).expect("embed query");
-    let d = embed_sentences(&ctx, &[doc]).expect("embed doc");
-
-    assert_eq!(q.dim, 768, "embedding must be 768-d");
-
-    // rows are unit-norm, so dot product == cosine similarity
-    let sim: f32 = q.rows[0].iter().zip(&d.rows[0]).map(|(a, b)| a * b).sum();
-    assert!(
-        (sim - 0.6857).abs() < 0.01,
-        "oracle drifted: got {sim:.4}, want 0.6857"
-    );
-}
-
-// Smoke test for the multi-task model we also bundle (`mdbr-leaf-mt`, the current
-// active model): it loads, emits 1024-d unit-norm vectors, and ranks an on-topic
-// doc above an off-topic one for the same query. The model card doesn't pin a
-// similarity value for this pair, so we assert shape + ordering rather than an
-// oracle constant.
-#[test]
-fn bundled_mt_model_is_1024d_and_ranks_sanely() {
-    let model_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/mdbr-leaf-mt");
-    let ctx = setup_model(&model_dir).expect("load bundled mt model files");
-
-    let query = format!("{QUERY_PREFIX}What is machine learning?");
-    let on_topic =
-        "Machine learning is a subset of artificial intelligence that learns from data."
-            .to_string();
-    let off_topic = "The central bank raised interest rates to curb rising inflation.".to_string();
-
-    let q = embed_sentences(&ctx, &[query]).expect("embed query");
-    let d = embed_sentences(&ctx, &[on_topic, off_topic]).expect("embed docs");
-
-    assert_eq!(q.dim, 1024, "mt embedding must be 1024-d");
+    assert_eq!(q.dim, 768);
+    let norm: f32 = q.rows[0].iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!((norm - 1.0).abs() < 1e-4, "unit norm, got {norm}");
 
     let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
     let on = cos(&q.rows[0], &d.rows[0]);
     let off = cos(&q.rows[0], &d.rows[1]);
-    assert!(on > off, "on-topic {on:.4} should outrank off-topic {off:.4}");
-
-    let norm: f32 = q.rows[0].iter().map(|x| x * x).sum::<f32>().sqrt();
-    assert!((norm - 1.0).abs() < 1e-3, "query vector not unit-norm: {norm}");
+    assert!(on > off + 0.05, "on-topic {on:.4} should clearly outrank off-topic {off:.4}");
 }
