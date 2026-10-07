@@ -89,6 +89,8 @@ base64 = "0.22"
 lancedb = "0.30"
 arrow-array = "58"
 arrow-schema = "58"
+# Temp files for vector-store tests and in-app voice recordings (AVFoundation
+# decodes from a path).
 tempfile = "3"
 futures = "0.3"
 

@@ -26,6 +26,11 @@ Tests:
 
 ```sh
 (cd src-tauri && cargo test)                   # app: chunking, store, pipeline, PDFium
-(cd semantra-embed && cargo test --release)    # model; parity tests need EG2_MODEL_DIR / EG2_GOLDEN_DIR
+(cd semantra-embed && cargo test --release)    # model
 pnpm check                                     # frontend types
 ```
+
+Fixture-dependent tests skip unless pointed at data: `PDF_FIXTURE` (a PDF),
+`EG2_MEDIA_DIR` (sample media), and `EG2_MODEL_DIR` / `EG2_GOLDEN_DIR` for the
+model's numerical parity tests against the FP32 PyTorch reference (generate the
+golden vectors with `semantra-embed/scripts/make_golden.py`).

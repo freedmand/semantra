@@ -211,3 +211,27 @@ fn oversized_inputs_are_truncated_not_embedded_whole() {
     let norm: f32 = e.rows[0].iter().map(|x| x * x).sum::<f32>().sqrt();
     assert!((norm - 1.0).abs() < 1e-3);
 }
+
+#[test]
+fn mixed_query_matches_single_modality_and_composes() {
+    let Some((model_dir, golden)) = dirs() else { return };
+    let media_dir = golden.parent().unwrap().join("media");
+    let gold: HashMap<String, Vec<f32>> =
+        serde_json::from_str(&std::fs::read_to_string(golden.join("embeddings.json")).unwrap()).unwrap();
+    let model = Model::load(&model_dir, 768).unwrap();
+    use semantra_embed::media::image;
+    // Text-only mixed query == the plain query path.
+    let q = model.embed_texts(&[format!("{}waves on a beach", semantra_embed::QUERY_PREFIX)]).unwrap();
+    let m = model.embed_query_mixed("waves on a beach", &[], &[]).unwrap();
+    assert!(dot(&q.rows[0], &m) > 0.9999, "text-only mixed == text query");
+    // Image-only mixed query == the image document embedding.
+    let prep = image::prepare(&image::decode(&media_dir.join("the_beach.jpg")).unwrap(), image::IMAGE_SOFT_TOKENS).unwrap();
+    let im = model.embed_query_mixed("", &[prep], &[]).unwrap();
+    let c = dot(&im, &gold["img_beach"]);
+    eprintln!("image-only mixed vs golden image: {c:.5}");
+    assert!(c > 0.995);
+    // Text + image composes: closer to each part than the parts are to each other.
+    let prep = image::prepare(&image::decode(&media_dir.join("the_beach.jpg")).unwrap(), image::IMAGE_SOFT_TOKENS).unwrap();
+    let both = model.embed_query_mixed("at night", &[prep], &[]).unwrap();
+    eprintln!("image+text vs image {:.3}, vs text {:.3}", dot(&both, &im), dot(&both, &model.embed_query_mixed("at night", &[], &[]).unwrap()));
+}

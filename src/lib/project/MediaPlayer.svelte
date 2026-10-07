@@ -2,7 +2,8 @@
   // Audio/video reader. The media element plays the file straight from the
   // app-data asset URL; below it a timeline shows the soundtrack's waveform,
   // every search hit in this file as a marker (audio windows below the
-  // waveform midline, video windows above), and the playhead. Clicking or
+  // waveform midline, video windows above, each lane labelled), and the
+  // playhead. Clicking or
   // dragging the timeline seeks; clicking a marker plays that window.
   // `navigate(startMs, endMs)` (from a result click) seeks to the window, plays
   // it, and keeps it highlighted.
@@ -90,6 +91,20 @@
       g.fillStyle = "#cbd5e1";
       g.fillRect(0, mid - 1, width, 2);
     }
+
+    // Lane labels (only for lanes that hold matches): picture on top, sound
+    // below — self-explanatory in place, so no separate legend.
+    g.font = "10px -apple-system, system-ui, sans-serif";
+    g.textBaseline = "top";
+    const label = (text: string, y: number) => {
+      const w = g.measureText(text).width + 8;
+      g.fillStyle = "rgba(255,255,255,0.85)";
+      g.fillRect(4, y, w, 14);
+      g.fillStyle = "#475569";
+      g.fillText(text, 8, y + 2);
+    };
+    if (markers.some((m) => m.modality === "video")) label("Picture", 4);
+    if (markers.some((m) => m.modality === "audio")) label("Sound", mid + 4);
 
     // Playhead.
     if (duration > 0) {
@@ -211,10 +226,6 @@
           Match {formatTime(active.start)}–{formatTime(active.end)}
         </span>
       {/if}
-      <span class="legend">
-        {#if markers.some((m) => m.modality === "video")}<i class="sw vid"></i> visual{/if}
-        {#if markers.some((m) => m.modality === "audio")}<i class="sw aud"></i> spoken/sound{/if}
-      </span>
     </div>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
@@ -274,26 +285,6 @@
     border-radius: var(--radius-sm);
     background: var(--color-score-badge);
     font-variant-numeric: tabular-nums;
-  }
-  .legend {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--color-text-muted);
-  }
-  .sw {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    border-radius: 2px;
-    margin-left: 8px;
-  }
-  .sw.vid {
-    background: rgba(57, 108, 216, 0.6);
-  }
-  .sw.aud {
-    background: rgba(234, 179, 8, 0.6);
   }
   .timeline {
     margin: 0 10px 10px;

@@ -112,6 +112,19 @@ export interface ProjectHit {
   timeEndMs: number | null;
 }
 
+/**
+ * Media attached to a search query (combined with the query text into one
+ * interleaved embedding): an image/audio file by path, or a voice recording
+ * as base64 bytes.
+ */
+export interface QueryAttachment {
+  kind: "image" | "audio";
+  path?: string;
+  dataBase64?: string;
+  /** Container extension for `dataBase64` (e.g. "m4a"). */
+  ext?: string;
+}
+
 /** A parsed CSV document: header row + data rows, all cells verbatim. */
 export interface CsvData {
   headers: string[];
@@ -246,6 +259,11 @@ export function getThumbnail(
   return p;
 }
 
+/** A JPEG `data:` URL preview of any local image file (e.g. a query attachment). */
+export async function thumbnailForPath(path: string, maxSide = 96): Promise<string> {
+  return await invoke<string>("thumbnail_for_path", { path, maxSide });
+}
+
 /** Peak amplitudes (0–1) of a file's audio in `buckets` equal slices. */
 export async function getWaveform(sha512: string, buckets: number): Promise<number[]> {
   return await invoke<number[]>("get_waveform", { sha512, buckets });
@@ -297,6 +315,7 @@ export async function searchProject(
   limit = 20,
   mode: "exact" | "ann" = "exact",
   modalities: Modality[] = [],
+  attachments: QueryAttachment[] = [],
 ): Promise<ProjectHit[]> {
   return await invoke<ProjectHit[]>("search_project", {
     projectId,
@@ -305,6 +324,7 @@ export async function searchProject(
     limit,
     mode,
     modalities,
+    attachments,
   });
 }
 

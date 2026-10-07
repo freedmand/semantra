@@ -37,7 +37,15 @@ import {
   type Preference,
   type IndexEvent,
   type Modality,
+  type QueryAttachment,
 } from "$lib/project/projectClient";
+
+/** A query attachment as shown in the search bar (UI fields + payload). */
+export interface SearchAttachment extends QueryAttachment {
+  id: number;
+  /** Chip text: file name, or "Recording 0:04". */
+  label: string;
+}
 
 export const SEARCH_LIMIT = 30;
 
@@ -98,6 +106,8 @@ interface SearchView {
   // Results-sidebar view preferences.
   /** Result-type filter (empty = every kind). Applied server-side. */
   modalities: Modality[];
+  /** Images/audio combined with the query text into one search. */
+  attachments: SearchAttachment[];
   filenameFilter: string;
   filterViewed: boolean;
   excerptView: boolean;
@@ -153,6 +163,7 @@ function emptySearch(): SearchView {
     runId: 0,
     requestNavigate: null,
     modalities: [],
+    attachments: [],
     filenameFilter: "",
     filterViewed: false,
     excerptView: false,
@@ -487,7 +498,7 @@ async function executeSearch(): Promise<void> {
   const prefs: Preference[] = Object.values(s.preferences)
     .filter((p) => p.weight !== 0)
     .map((p) => ({ text: p.hit.text, weight: p.weight, id: p.hit.index }));
-  if (s.query.trim() === "" && prefs.length === 0) {
+  if (s.query.trim() === "" && prefs.length === 0 && s.attachments.length === 0) {
     s.results = [];
     s.unsearched = true;
     return;
@@ -495,7 +506,13 @@ async function executeSearch(): Promise<void> {
   const myRun = ++s.runId;
   const parsed = parseQuery(s.query);
   s.literals = parsed.literals;
-  s.results = await searchProject(s.projectId, s.query, prefs, s.limit, "exact", s.modalities);
+  const attachments: QueryAttachment[] = s.attachments.map(({ kind, path, dataBase64, ext }) => ({
+    kind,
+    path,
+    dataBase64,
+    ext,
+  }));
+  s.results = await searchProject(s.projectId, s.query, prefs, s.limit, "exact", s.modalities, attachments);
   s.unsearched = false;
   s.explanations = {};
 
@@ -525,6 +542,24 @@ export async function toggleModality(m: Modality): Promise<void> {
 export async function clearModalities(): Promise<void> {
   appState.search.modalities = [];
   appState.search.limit = SEARCH_LIMIT;
+  await executeSearch();
+}
+
+let nextAttachmentId = 1;
+
+/** Attach an image/audio (file or recording) to the query and re-search. */
+export async function addAttachment(a: Omit<SearchAttachment, "id">): Promise<void> {
+  const s = appState.search;
+  s.attachments = [...s.attachments, { ...a, id: nextAttachmentId++ }];
+  s.limit = SEARCH_LIMIT;
+  await executeSearch();
+}
+
+/** Remove a query attachment and re-search. */
+export async function removeAttachment(id: number): Promise<void> {
+  const s = appState.search;
+  s.attachments = s.attachments.filter((a) => a.id !== id);
+  s.limit = SEARCH_LIMIT;
   await executeSearch();
 }
 

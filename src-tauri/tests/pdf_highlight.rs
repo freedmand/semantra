@@ -14,10 +14,9 @@ use std::path::PathBuf;
 use semantra_lib::chunk::{Chunker, TokenWindowChunker};
 use semantra_lib::{extract, pdf};
 
+/// A text-bearing PDF to test against, from `PDF_FIXTURE`; skips when unset.
 fn fixture() -> Option<String> {
-    // The bundled example doc lives in the sibling semantra-web checkout.
-    let p = PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join("scraps/semantra-web/docs/example_docs/hamlet.pdf");
+    let p = PathBuf::from(std::env::var("PDF_FIXTURE").ok()?);
     p.exists().then(|| p.to_string_lossy().to_string())
 }
 

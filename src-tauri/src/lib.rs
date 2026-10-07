@@ -1238,6 +1238,99 @@ async fn build_centroid(
     Ok(Some(centroid))
 }
 
+/// A file attached to a search query: an image or audio file by path, or an
+/// in-app voice recording as base64 bytes (with its container extension).
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryAttachment {
+    /// "image" or "audio".
+    kind: String,
+    path: Option<String>,
+    data_base64: Option<String>,
+    ext: Option<String>,
+}
+
+/// Decode a query's attachments (off the async runtime) and embed them with
+/// the text as one interleaved query vector.
+async fn embed_mixed_query(
+    embedder: &EmbedService,
+    text: String,
+    attachments: Vec<QueryAttachment>,
+) -> Result<Vec<f32>, String> {
+    use base64::Engine;
+    use semantra_embed::media::{av, image};
+    let (images, clips) = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+        let mut images = Vec::new();
+        let mut clips: Vec<Vec<f32>> = Vec::new();
+        for a in attachments {
+            // A recording arrives as bytes; AVFoundation decodes from a file.
+            let tmp = match &a.data_base64 {
+                Some(b64) => {
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .map_err(|e| format!("bad attachment data: {e}"))?;
+                    let ext = a.ext.as_deref().unwrap_or("m4a").trim_start_matches('.');
+                    let mut f = tempfile::Builder::new()
+                        .suffix(&format!(".{ext}"))
+                        .tempfile()
+                        .map_err(|e| format!("temp file: {e}"))?;
+                    std::io::Write::write_all(&mut f, &bytes).map_err(|e| format!("temp file: {e}"))?;
+                    Some(f)
+                }
+                None => None,
+            };
+            let path = match (&tmp, &a.path) {
+                (Some(f), _) => f.path().to_path_buf(),
+                (None, Some(p)) => PathBuf::from(p),
+                (None, None) => return Err("attachment has no path or data".into()),
+            };
+            match a.kind.as_str() {
+                "image" => {
+                    let rgb = image::decode(&path).map_err(|e| e.to_string())?;
+                    images.push(image::prepare(&rgb, image::IMAGE_SOFT_TOKENS).map_err(|e| e.to_string())?);
+                }
+                "audio" => {
+                    let mut pcm = Vec::new();
+                    av::stream_audio(&path, |c| {
+                        if pcm.len() < semantra_embed::media::mel::MAX_SAMPLES {
+                            pcm.extend_from_slice(c);
+                        }
+                        Ok(())
+                    })
+                    .map_err(|e| e.to_string())?;
+                    clips.push(pcm);
+                }
+                other => return Err(format!("unsupported attachment kind {other:?}")),
+            }
+        }
+        Ok((images, clips))
+    })
+    .await
+    .map_err(|e| format!("attachment task panicked: {e}"))??;
+    embedder
+        .run(Lane::Priority, move |m| {
+            let refs: Vec<&[f32]> = clips.iter().map(|c| c.as_slice()).collect();
+            m.embed_query_mixed(&text, &images, &refs)
+        })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// A JPEG `data:` URL preview of an arbitrary local image (e.g. one attached
+/// to a query, which lives outside the app-data asset scope).
+#[tauri::command]
+async fn thumbnail_for_path(path: String, max_side: u32) -> Result<String, String> {
+    use base64::Engine;
+    use semantra_embed::media::image;
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let rgb = image::decode_max(std::path::Path::new(&path), max_side.clamp(32, 1024)).map_err(|e| e.to_string())?;
+        let jpeg = image::encode_jpeg(&rgb, 0.8).map_err(|e| e.to_string())?;
+        Ok(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(jpeg)))
+    })
+    .await
+    .map_err(|e| format!("thumbnail task panicked: {e}"))?
+}
+
 /// The in-project search: parse the query into weighted semantic terms + quoted
 /// keyword literals, fold in relevance-feedback `preferences`, and return ranked
 /// hits restricted to the project's files.
@@ -1252,7 +1345,9 @@ async fn search_project(
     limit: usize,
     mode: String,
     modalities: Option<Vec<String>>,
+    attachments: Option<Vec<QueryAttachment>>,
 ) -> Result<Vec<ProjectHit>, String> {
+    let attachments = attachments.unwrap_or_default();
     let mode = SearchMode::parse(&mode)?;
     // Result-type filter (empty/absent = every modality).
     let modalities: Vec<Modality> = modalities.unwrap_or_default().iter().map(|m| Modality::parse(m)).collect();
@@ -1269,6 +1364,17 @@ async fn search_project(
     // Parse + normalize weights (semantic terms and preferences share the split).
     let parsed = query::parse_query(&query);
     let mut semantic = parsed.semantic;
+    // With attached media, the positive text terms and the media embed together
+    // as ONE interleaved query (the model composes them natively, e.g. a photo
+    // + "but at night"); it takes a single positive slot in the weighting,
+    // alongside any negative terms and feedback marks.
+    let mut mixed_text: Option<String> = None;
+    if !attachments.is_empty() {
+        let positive: Vec<String> = semantic.iter().filter(|t| t.weight > 0.0).map(|t| t.text.clone()).collect();
+        mixed_text = Some(positive.join(" "));
+        semantic.retain(|t| t.weight < 0.0);
+        semantic.insert(0, query::WeightedTerm { text: String::new(), weight: 1.0 });
+    }
     let mut prefs = preferences;
     query::normalize_weights(&mut semantic, &mut prefs);
     let literals = parsed.literals;
@@ -1277,8 +1383,12 @@ async fn search_project(
     // stored chunk uses that chunk's vector; one without (legacy) its text.
     let ids: Vec<i64> = prefs.iter().filter_map(|p| p.id).collect();
     let stored = store.lock().await.vectors_by_id(&ids).await?;
-    let mut texts: Vec<(String, f32)> = semantic.iter().map(|t| (t.text.clone(), t.weight)).collect();
     let mut vectors: Vec<(Vec<f32>, f32)> = Vec::new();
+    if let Some(text) = mixed_text {
+        let weight = semantic.remove(0).weight;
+        vectors.push((embed_mixed_query(embedder.inner(), text, attachments).await?, weight));
+    }
+    let mut texts: Vec<(String, f32)> = semantic.iter().map(|t| (t.text.clone(), t.weight)).collect();
     for p in &prefs {
         match p.id.and_then(|id| stored.get(&id)) {
             Some(v) => vectors.push((v.clone(), p.weight)),
@@ -1482,6 +1592,7 @@ pub fn run() {
             get_pdf_src,
             get_csv_data,
             get_thumbnail,
+            thumbnail_for_path,
             get_waveform,
             get_highlight_rects,
             search_project

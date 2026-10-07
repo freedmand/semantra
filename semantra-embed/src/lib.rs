@@ -284,6 +284,61 @@ impl Model {
         })
     }
 
+    /// Embed one **mixed** query — text plus any number of images and audio
+    /// clips — as a single interleaved sequence, the model's native way of
+    /// composing modalities (e.g. a photo + "but at night"):
+    ///
+    /// ```text
+    ///   <bos> task: search result | query: {text}
+    ///         ( <|image> soft… <image|> )*  ( <|audio> soft… <audio|> )*  <eos>
+    /// ```
+    ///
+    /// The query prompt is included only when there is text (bare media take
+    /// no prompt). Audio clips longer than 30 s are truncated to 30 s.
+    pub fn embed_query_mixed(
+        &self,
+        text: &str,
+        images: &[media::image::Prepared],
+        audio: &[&[f32]],
+    ) -> Result<Vec<f32>> {
+        let c = &self.config;
+        let ids: Vec<i32> = if text.trim().is_empty() {
+            vec![2] // <bos>
+        } else {
+            let enc = self
+                .tokenizer
+                .encode(format!("{QUERY_PREFIX}{text}"), false)
+                .map_err(Error::msg)?;
+            std::iter::once(2).chain(enc.get_ids().iter().map(|&i| i as i32)).collect()
+        };
+        let mut parts: Vec<Array> = vec![self.text.embed(&Array::from_slice(&ids, &[1, ids.len() as i32]))?];
+        let delim = |id: u32| self.text.embed(&Array::from_slice(&[id as i32], &[1, 1]));
+        for img in images {
+            let soft = self.vision()?.forward(&media::image::stack(&[img])?)?; // (1, n, H)
+            parts.extend([delim(c.boi_token_id)?, soft.as_dtype(self.text.dtype())?, delim(c.eoi_token_id)?]);
+        }
+        for clip in audio {
+            let tower = self
+                .audio
+                .as_ref()
+                .ok_or_else(|| anyhow!("this checkpoint has no audio tower"))?;
+            let clip = &clip[..clip.len().min(media::mel::MAX_SAMPLES)];
+            if clip.is_empty() {
+                continue;
+            }
+            let (mel, valid) = media::mel::log_mel(&[clip])?;
+            let (soft, soft_valid) = tower.forward(&mel, &valid)?;
+            let n = soft_valid.as_dtype(Dtype::Int32)?.sum_axis(1, false)?.max(None)?.item_cast::<i32>();
+            let soft = soft.index((.., 0..n, ..));
+            parts.extend([delim(c.boa_token_id)?, soft.as_dtype(self.text.dtype())?, delim(c.eoa_token_index)?]);
+        }
+        parts.push(delim(1)?); // <eos>
+        let seq = mlx_rs::ops::concatenate(&parts, 1)?;
+        let per_token = self.text.forward(&seq, None)?;
+        let pooled = self.pool(&per_token, None)?;
+        Ok(rows_of(&pooled, self.dim)?.into_iter().next().unwrap_or_default())
+    }
+
     /// Tokenize a batch -> ((B, L) int32 ids, (B, L) bool validity mask).
     /// The mask is `None` when no row needed padding.
     fn tokenize(&self, inputs: &[String]) -> Result<(Array, Option<Array>)> {

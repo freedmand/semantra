@@ -1,9 +1,11 @@
 //! End-to-end media indexing: real `media::plan`/`media::run` over image,
 //! audio and video fixtures (plus text chunks) into a temp LanceDB, then
-//! cross-modal search. Needs the bundled model and the lab media fixtures
-//! (`EG2_MEDIA_DIR`); skips otherwise.
+//! cross-modal search. Needs the bundled model and a media fixtures dir
+//! (`EG2_MEDIA_DIR`, containing the_beach.jpg, tree.jpg, pasta.wav — speech
+//! about making pasta — and clip.mp4 — beach then tree, with that speech);
+//! skips otherwise.
 //!
-//!   EG2_MEDIA_DIR=~/scraps/eg2-lab/media cargo test --test multimodal_index -- --nocapture
+//!   EG2_MEDIA_DIR=/path/to/media cargo test --test multimodal_index -- --nocapture
 
 use std::path::PathBuf;
 

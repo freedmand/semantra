@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Merged into the bundle's Info.plist by Tauri. Voice search records a
+       short clip in the webview; macOS requires a usage string for the mic. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Semantra uses the microphone only when you record a voice search.</string>
+</dict>
+</plist>

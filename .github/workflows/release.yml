@@ -61,7 +61,7 @@ jobs:
       matrix:
         include:
           - name: macOS (Apple Silicon)
-            os: macos-15
+            os: macos-26
             rust_target: aarch64-apple-darwin
             toolchain_targets: aarch64-apple-darwin
             args: "--target aarch64-apple-darwin"
@@ -70,11 +70,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # MLX (built from source by mlx-sys via CMake) compiles Metal shaders.
-      # Xcode 26+ ships the Metal toolchain as a separate download; older Xcode
-      # includes it, so a failure here is fine.
+      # MLX (built from source by mlx-sys via CMake) compiles Metal shaders;
+      # Xcode 26 ships the Metal toolchain as a separate download. The macOS 26
+      # SDK is also required to target macOS 26.2 (bundle.macOS
+      # .minimumSystemVersion), which enables MLX's M5 neural-accelerator
+      # kernels.
       - name: Install Metal toolchain
-        run: xcodebuild -downloadComponent MetalToolchain || true
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -downloadComponent MetalToolchain
 
       # The lance/datafusion stack runs `protoc` at build time to codegen its
       # protobuf types. Not preinstalled on the runners; this action installs it

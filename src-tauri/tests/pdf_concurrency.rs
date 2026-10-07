@@ -3,22 +3,13 @@
 //! and requires every call to succeed. Without the lock this test crashes the
 //! process or fails with spurious `FormatError`s.
 //!
-//! Uses `PDF_FIXTURE` if set, else the first PDF in the app-data files dir.
+//! Needs a PDF via `PDF_FIXTURE` (multi-page); skips when unset.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 fn fixture() -> Option<String> {
-    if let Ok(p) = std::env::var("PDF_FIXTURE") {
-        return Some(p);
-    }
-    let dir = PathBuf::from(std::env::var("HOME").ok()?).join("Library/Application Support/com.semantra.app/files");
-    std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|e| e == "pdf"))
-        .map(|p| p.to_string_lossy().into_owned())
+    std::env::var("PDF_FIXTURE").ok().filter(|p| std::path::Path::new(p).exists())
 }
 
 #[test]
