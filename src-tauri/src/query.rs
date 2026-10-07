@@ -31,6 +31,11 @@ pub struct WeightedTerm {
 pub struct Preference {
     pub text: String,
     pub weight: f32,
+    /// The marked hit's chunk id. When present, its stored vector is used
+    /// directly ("more like this" works for images/audio/video, which have no
+    /// text, and reuses the exact document embedding for text).
+    #[serde(default)]
+    pub id: Option<i64>,
 }
 
 /// A parsed query: weighted semantic terms plus exact-keyword literals.
@@ -394,7 +399,7 @@ mod tests {
     #[test]
     fn normalization_balances_positive_and_negative() {
         let mut sem = terms(&[("good", 1.0)]);
-        let mut prefs = vec![Preference { text: "bad".into(), weight: -1.0 }];
+        let mut prefs = vec![Preference { text: "bad".into(), weight: -1.0, id: None }];
         normalize_weights(&mut sem, &mut prefs);
         assert!((sem[0].weight - POSITIVE_RATIO).abs() < 1e-6);
         assert!((prefs[0].weight + (1.0 - POSITIVE_RATIO)).abs() < 1e-6);

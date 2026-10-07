@@ -11,7 +11,7 @@
 //! how they are normalized, and how they are colored is decided entirely on the
 //! frontend, so display choices can change without touching Rust.
 
-use leaf_ir_candle_test::{Explanation as CoreExplanation, TokenContribution as CoreToken};
+use semantra_embed::{Explanation as CoreExplanation, TokenContribution as CoreToken};
 
 /// One token's signed share of a cosine similarity, with byte offsets into the
 /// original chunk text. Mirrors the frontend `TokenSpan`.
@@ -22,12 +22,13 @@ pub struct TokenSpan {
     pub start: usize,
     /// Byte offset (exclusive end) of this token in the chunk text.
     pub end: usize,
-    /// WordPiece sub-tokens of one whitespace word share a `word_id`; `null` for
-    /// special tokens. Lets the frontend aggregate pieces back to whole words.
+    /// Sub-word pieces of one whitespace word share a `word_id`; `null` for
+    /// special/prompt tokens. Lets the frontend aggregate pieces back to whole words.
     pub word_id: Option<u32>,
     /// Exact additive share of the cosine similarity (signed).
     pub score: f32,
-    /// True for `[CLS]`/`[SEP]`: real contribution mass, but not chunk text.
+    /// True for `<bos>`/`<eos>` and document-prompt tokens: real contribution
+    /// mass, but not chunk text.
     pub special: bool,
 }
 
@@ -37,7 +38,8 @@ pub struct TokenSpan {
 #[serde(rename_all = "camelCase")]
 pub struct Explanation {
     pub tokens: Vec<TokenSpan>,
-    /// Constant share attributable to no single token.
+    /// Constant share attributable to no single token (0 for EmbeddingGemma 2,
+    /// whose projection has no bias).
     pub bias: f32,
     /// The cosine similarity this explanation decomposes.
     pub total: f32,

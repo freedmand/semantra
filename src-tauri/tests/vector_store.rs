@@ -8,7 +8,7 @@
 //!
 //! Run with: cargo test --release
 
-use semantra_lib::store::{ChunkRow, SearchMode, VectorStore};
+use semantra_lib::store::{ChunkRow, Modality, SearchMode, VectorStore};
 
 const DIM: usize = 16;
 const FILE: &str = "fileA";
@@ -46,11 +46,14 @@ fn basis(i: usize) -> Vec<f32> {
 fn row(file: &str, text: &str, vector: Vec<f32>) -> ChunkRow {
     ChunkRow {
         sha512: file.to_string(),
+        modality: Modality::Text,
         text: text.to_string(),
         char_start: 0,
         char_end: text.chars().count() as i64,
         page: None,
         page_char_start: 0,
+        time_start_ms: None,
+        time_end_ms: None,
         pipeline_version: "test".to_string(),
         vector,
     }
@@ -79,7 +82,7 @@ async fn exact_search_finds_planted() {
     let q = normalize(q);
 
     let hits = store
-        .search(&q, 3, SearchMode::Exact, &[FILE.into()])
+        .search(&q, 3, SearchMode::Exact, &[FILE.into()], &[])
         .await
         .unwrap();
     assert_eq!(hits.len(), 3, "should return the requested k");
@@ -108,14 +111,14 @@ async fn ann_index_builds_and_recalls() {
     store.maybe_build_ann().await.unwrap();
 
     let ann = store
-        .search(&needle, 5, SearchMode::Ann, &[FILE.into()])
+        .search(&needle, 5, SearchMode::Ann, &[FILE.into()], &[])
         .await
         .unwrap();
     assert_eq!(ann[0].text, "needle", "ANN should recall the planted needle first");
     assert!(ann[0].score > 0.99, "needle score should be ~1, got {}", ann[0].score);
 
     let exact = store
-        .search(&needle, 5, SearchMode::Exact, &[FILE.into()])
+        .search(&needle, 5, SearchMode::Exact, &[FILE.into()], &[])
         .await
         .unwrap();
     assert_eq!(exact[0].text, "needle");
@@ -160,7 +163,7 @@ async fn delete_file_clears_only_that_file() {
 
     // Empty file filter → no hits, not an error.
     let hits = store
-        .search(&basis(0), 5, SearchMode::Exact, &[])
+        .search(&basis(0), 5, SearchMode::Exact, &[], &[])
         .await
         .unwrap();
     assert!(hits.is_empty());

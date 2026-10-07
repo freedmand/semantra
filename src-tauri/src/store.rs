@@ -5,7 +5,9 @@
 //! window plus the metadata needed to (a) attribute it to a source file
 //! (`sha512`), (b) map it back to an exact source span for highlighting
 //! (`char_start/char_end` in the flat text, `page` + `page_char_start` in PDF
-//! page space), and (c) know which pipeline produced it (`pipeline_version`).
+//! page space, or `time_start_ms..time_end_ms` for audio/video), (c) know which
+//! modality it embeds (`text`, `image`, `audio`, `video` — all share one vector
+//! space), and (d) know which pipeline produced it (`pipeline_version`).
 //!
 //! Vectors are the model's unit-norm embeddings, so cosine distance is the right
 //! metric and `score = 1 - distance` is a true cosine similarity in `[0, 1]`.
@@ -71,15 +73,55 @@ impl SearchMode {
     }
 }
 
+/// What a chunk's vector embeds. Text, images (incl. rendered PDF pages),
+/// audio windows and video windows all live in one shared embedding space, so a
+/// text query ranks them together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Modality {
+    Text,
+    Image,
+    Audio,
+    Video,
+}
+
+impl Modality {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Modality::Text => "text",
+            Modality::Image => "image",
+            Modality::Audio => "audio",
+            Modality::Video => "video",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "image" => Modality::Image,
+            "audio" => Modality::Audio,
+            "video" => Modality::Video,
+            _ => Modality::Text,
+        }
+    }
+}
+
 /// A chunk to insert, with its embedding. The store assigns the row `id`.
 #[derive(Clone, Debug)]
 pub struct ChunkRow {
     pub sha512: String,
+    pub modality: Modality,
+    /// Searchable text: the chunk itself for text rows; empty for media rows
+    /// (images, rendered PDF pages, audio/video windows), so keyword search
+    /// only ever matches text chunks — a PDF page's words are already covered
+    /// by its own text chunks.
     pub text: String,
     pub char_start: i64,
     pub char_end: i64,
     pub page: Option<i64>,
     pub page_char_start: i64,
+    /// Time span (ms) of an audio/video window; `None` otherwise.
+    pub time_start_ms: Option<i64>,
+    pub time_end_ms: Option<i64>,
     pub pipeline_version: String,
     pub vector: Vec<f32>,
 }
@@ -91,6 +133,7 @@ pub struct ChunkRow {
 pub struct Hit {
     pub id: i64,
     pub sha512: String,
+    pub modality: Modality,
     pub text: String,
     /// Cosine distance for dense hits; BM25-derived pseudo-distance for FTS hits.
     pub distance: f32,
@@ -99,6 +142,8 @@ pub struct Hit {
     pub char_end: i64,
     pub page: Option<i64>,
     pub page_char_start: i64,
+    pub time_start_ms: Option<i64>,
+    pub time_end_ms: Option<i64>,
 }
 
 /// Persistent LanceDB-backed chunk store.
@@ -192,11 +237,14 @@ impl VectorStore {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
             Field::new("sha512", DataType::Utf8, false),
+            Field::new("modality", DataType::Utf8, false),
             Field::new("text", DataType::Utf8, false),
             Field::new("char_start", DataType::Int64, false),
             Field::new("char_end", DataType::Int64, false),
             Field::new("page", DataType::Int64, true),
             Field::new("page_char_start", DataType::Int64, false),
+            Field::new("time_start_ms", DataType::Int64, true),
+            Field::new("time_end_ms", DataType::Int64, true),
             Field::new("pipeline_version", DataType::Utf8, false),
             Field::new(
                 "vector",
@@ -217,11 +265,15 @@ impl VectorStore {
     fn build_batch(&self, start_id: i64, rows: &[ChunkRow]) -> Result<RecordBatch, String> {
         let ids = Int64Array::from_iter_values(start_id..start_id + rows.len() as i64);
         let sha = StringArray::from(rows.iter().map(|r| r.sha512.as_str()).collect::<Vec<_>>());
+        let modality =
+            StringArray::from(rows.iter().map(|r| r.modality.as_str()).collect::<Vec<_>>());
         let text = StringArray::from(rows.iter().map(|r| r.text.as_str()).collect::<Vec<_>>());
         let cstart = Int64Array::from(rows.iter().map(|r| r.char_start).collect::<Vec<_>>());
         let cend = Int64Array::from(rows.iter().map(|r| r.char_end).collect::<Vec<_>>());
         let page = Int64Array::from(rows.iter().map(|r| r.page).collect::<Vec<_>>());
         let pstart = Int64Array::from(rows.iter().map(|r| r.page_char_start).collect::<Vec<_>>());
+        let tstart = Int64Array::from(rows.iter().map(|r| r.time_start_ms).collect::<Vec<_>>());
+        let tend = Int64Array::from(rows.iter().map(|r| r.time_end_ms).collect::<Vec<_>>());
         let pv = StringArray::from(
             rows.iter().map(|r| r.pipeline_version.as_str()).collect::<Vec<_>>(),
         );
@@ -235,11 +287,14 @@ impl VectorStore {
             vec![
                 Arc::new(ids),
                 Arc::new(sha),
+                Arc::new(modality),
                 Arc::new(text),
                 Arc::new(cstart),
                 Arc::new(cend),
                 Arc::new(page),
                 Arc::new(pstart),
+                Arc::new(tstart),
+                Arc::new(tend),
                 Arc::new(pv),
                 Arc::new(vec_arr),
             ],
@@ -336,13 +391,16 @@ impl VectorStore {
         Ok(())
     }
 
-    /// Dense nearest-neighbour search restricted to `sha_filter` files.
+    /// Dense nearest-neighbour search restricted to `sha_filter` files and,
+    /// when `modalities` is non-empty, to those kinds of rows (applied as a
+    /// prefilter, so the top `k` are the best of the requested kinds).
     pub async fn search(
         &self,
         query: &[f32],
         k: usize,
         mode: SearchMode,
         sha_filter: &[String],
+        modalities: &[Modality],
     ) -> Result<Vec<Hit>, String> {
         let Some(table) = &self.table else {
             return Ok(Vec::new());
@@ -350,9 +408,14 @@ impl VectorStore {
         if sha_filter.is_empty() {
             return Ok(Vec::new());
         }
+        let mut predicate = sha_in(sha_filter);
+        if !modalities.is_empty() {
+            let list = modalities.iter().map(|m| format!("'{}'", m.as_str())).collect::<Vec<_>>().join(", ");
+            predicate = format!("{predicate} AND modality IN ({list})");
+        }
         let mut q = table
             .query()
-            .only_if(sha_in(sha_filter))
+            .only_if(predicate)
             .nearest_to(query)
             .map_err(|e| format!("build vector query: {e}"))?
             .distance_type(DistanceType::Cosine)
@@ -373,6 +436,42 @@ impl VectorStore {
         hits.sort_by(|a, b| a.distance.total_cmp(&b.distance));
         hits.truncate(k);
         Ok(hits)
+    }
+
+    /// Stored vectors for chunk `ids` (missing ids are simply absent).
+    pub async fn vectors_by_id(&self, ids: &[i64]) -> Result<std::collections::HashMap<i64, Vec<f32>>, String> {
+        let mut out = std::collections::HashMap::new();
+        let Some(table) = &self.table else {
+            return Ok(out);
+        };
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let list = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if(format!("id IN ({list})"))
+            .select(lancedb::query::Select::columns(&["id", "vector"]))
+            .execute()
+            .await
+            .map_err(|e| format!("fetch vectors: {e}"))?
+            .try_collect()
+            .await
+            .map_err(|e| format!("collect vectors: {e}"))?;
+        for b in &batches {
+            let (Some(idc), Some(vc)) = (
+                b.column_by_name("id").and_then(|c| c.as_any().downcast_ref::<Int64Array>()),
+                b.column_by_name("vector").and_then(|c| c.as_any().downcast_ref::<FixedSizeListArray>()),
+            ) else {
+                continue;
+            };
+            for i in 0..b.num_rows() {
+                let v = vc.value(i);
+                let Some(f) = v.as_any().downcast_ref::<Float32Array>() else { continue };
+                out.insert(idc.value(i), f.values().to_vec());
+            }
+        }
+        Ok(out)
     }
 
     /// Substring candidate search backing the quoted-keyword *prefix* filter.
@@ -620,6 +719,9 @@ fn rows_to_hits(batches: &[RecordBatch], metric_col: &str, distance_is_cosine: b
             continue;
         };
         let page = n("page");
+        let modality = s("modality");
+        let (tstart, tend) = (n("time_start_ms"), n("time_end_ms"));
+        let opt = |a: Option<&Int64Array>, i: usize| a.and_then(|a| (!a.is_null(i)).then(|| a.value(i)));
         let metric = f(metric_col);
         for i in 0..b.num_rows() {
             let m = metric.map(|a| a.value(i)).unwrap_or(0.0);
@@ -632,13 +734,16 @@ fn rows_to_hits(batches: &[RecordBatch], metric_col: &str, distance_is_cosine: b
             hits.push(Hit {
                 id: ids.value(i),
                 sha512: sha.value(i).to_string(),
+                modality: modality.map_or(Modality::Text, |m| Modality::parse(m.value(i))),
                 text: text.value(i).to_string(),
                 distance,
                 score,
                 char_start: cstart.value(i),
                 char_end: cend.value(i),
-                page: page.and_then(|p| if p.is_null(i) { None } else { Some(p.value(i)) }),
+                page: opt(page, i),
                 page_char_start: pstart.value(i),
+                time_start_ms: opt(tstart, i),
+                time_end_ms: opt(tend, i),
             });
         }
     }
@@ -661,14 +766,46 @@ mod tests {
     fn row(sha: &str, text: &str, vector: Vec<f32>) -> ChunkRow {
         ChunkRow {
             sha512: sha.into(),
+            modality: Modality::Text,
             text: text.into(),
             char_start: 0,
             char_end: text.chars().count() as i64,
             page: None,
             page_char_start: 0,
+            time_start_ms: None,
+            time_end_ms: None,
             pipeline_version: "v1".into(),
             vector,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn modality_filter_returns_best_of_requested_kinds() {
+        let (mut store, _t) = temp_store(2).await;
+        let media = |m: Modality, v: Vec<f32>| ChunkRow { modality: m, text: String::new(), ..row("f", "", v) };
+        store
+            .insert(&[
+                row("f", "closest text", vec![1.0, 0.0]),
+                media(Modality::Image, vec![0.9, 0.1]),
+                media(Modality::Audio, vec![0.0, 1.0]), // farthest
+                media(Modality::Video, vec![0.7, 0.3]),
+            ])
+            .await
+            .unwrap();
+        let shas = ["f".to_string()];
+        let all = store.search(&[1.0, 0.0], 10, SearchMode::Exact, &shas, &[]).await.unwrap();
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[0].modality, Modality::Text);
+        // Only audio requested: the far audio row is still returned (prefilter,
+        // not post-filtering a global top-k).
+        let audio = store.search(&[1.0, 0.0], 1, SearchMode::Exact, &shas, &[Modality::Audio]).await.unwrap();
+        assert_eq!(audio.len(), 1);
+        assert_eq!(audio[0].modality, Modality::Audio);
+        let visual = store
+            .search(&[1.0, 0.0], 10, SearchMode::Exact, &shas, &[Modality::Image, Modality::Video])
+            .await
+            .unwrap();
+        assert_eq!(visual.iter().map(|h| h.modality).collect::<Vec<_>>(), vec![Modality::Image, Modality::Video]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -684,7 +821,7 @@ mod tests {
 
         // Restrict to fileB: even a query pointing at fileA's vector only returns B.
         let hits = store
-            .search(&[1.0, 0.0], 5, SearchMode::Exact, &["fileB".into()])
+            .search(&[1.0, 0.0], 5, SearchMode::Exact, &["fileB".into()], &[])
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
@@ -692,7 +829,7 @@ mod tests {
 
         // Empty filter → nothing.
         assert!(store
-            .search(&[1.0, 0.0], 5, SearchMode::Exact, &[])
+            .search(&[1.0, 0.0], 5, SearchMode::Exact, &[], &[])
             .await
             .unwrap()
             .is_empty());

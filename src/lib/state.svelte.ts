@@ -24,6 +24,7 @@ import {
   searchProject,
   addFilesToProject,
   deleteFileFromProject,
+  retryFile,
   renameProject as renameProjectCmd,
   deleteProject as deleteProjectCmd,
   createProject as createProjectCmd,
@@ -35,7 +36,16 @@ import {
   type ProjectHit,
   type Preference,
   type IndexEvent,
+  type Modality,
+  type QueryAttachment,
 } from "$lib/project/projectClient";
+
+/** A query attachment as shown in the search bar (UI fields + payload). */
+export interface SearchAttachment extends QueryAttachment {
+  id: number;
+  /** Chip text: file name, or "Recording 0:04". */
+  label: string;
+}
 
 export const SEARCH_LIMIT = 30;
 
@@ -94,6 +104,10 @@ interface SearchView {
   /** Imperative navigation glue registered by the search page (see module doc). */
   requestNavigate: ((hit: ProjectHit) => void) | null;
   // Results-sidebar view preferences.
+  /** Result-type filter (empty = every kind). Applied server-side. */
+  modalities: Modality[];
+  /** Images/audio combined with the query text into one search. */
+  attachments: SearchAttachment[];
   filenameFilter: string;
   filterViewed: boolean;
   excerptView: boolean;
@@ -148,6 +162,8 @@ function emptySearch(): SearchView {
     pendingNav: null,
     runId: 0,
     requestNavigate: null,
+    modalities: [],
+    attachments: [],
     filenameFilter: "",
     filterViewed: false,
     excerptView: false,
@@ -248,7 +264,10 @@ class AppState {
     const out = [...byFile.values()];
     for (const g of out) {
       g.hits.sort((a, b) => b.score - a.score);
-      g.score = g.hits.reduce((s, h) => s + h.score, 0) / g.hits.length;
+      // A file ranks by its best hit: with mixed modalities a video can have
+      // one strong soundtrack match and weaker visual ones, and a mean would
+      // bury it.
+      g.score = g.hits[0]?.score ?? 0;
     }
     out.sort((a, b) => b.score - a.score);
     return out.filter((g) =>
@@ -269,6 +288,23 @@ class AppState {
   prefList = $derived(Object.values(this.search.preferences).filter((p) => p.weight !== 0));
 
   /** Whether the last search likely has more results to fetch (hit the cap). */
+  /**
+   * Result kinds this project can produce, in display order — offered as the
+   * result-type filter. PDFs yield text + page visuals; videos yield visual +
+   * soundtrack windows.
+   */
+  searchModalities = $derived.by<Modality[]>(() => {
+    const have = new Set<Modality>();
+    for (const d of this.search.docs) {
+      if (d.filetype === "text" || d.filetype === "csv") have.add("text");
+      else if (d.filetype === "pdf") (have.add("text"), have.add("image"));
+      else if (d.filetype === "image") have.add("image");
+      else if (d.filetype === "audio") have.add("audio");
+      else if (d.filetype === "video") (have.add("video"), have.add("audio"));
+    }
+    return (["text", "image", "video", "audio"] as Modality[]).filter((m) => have.has(m));
+  });
+
   searchHasMore = $derived(
     !this.search.unsearched && this.search.results.length >= this.search.limit,
   );
@@ -319,8 +355,10 @@ function formatBytes(n: number): string {
  */
 export function manageRowStats(row: ManageRow): string | null {
   if (row.state !== "indexed" || row.wordCount == null) return null;
+  const media: Partial<Record<Filetype, string>> = { image: "Image", audio: "Audio", video: "Video" };
   const parts = [
-    `${row.wordCount.toLocaleString()} ${row.wordCount === 1 ? "word" : "words"}`,
+    media[row.filetype!] ??
+      `${row.wordCount.toLocaleString()} ${row.wordCount === 1 ? "word" : "words"}`,
   ];
   if (row.filetype === "pdf" && row.pageCount) {
     parts.push(`${row.pageCount.toLocaleString()} ${row.pageCount === 1 ? "page" : "pages"}`);
@@ -410,6 +448,13 @@ export async function removeManageFile(sha512: string): Promise<void> {
   await refreshProjects();
 }
 
+/** Retry a failed file in the manage view. */
+export async function retryManageFile(sha512: string): Promise<void> {
+  await retryFile(appState.manage.projectId, sha512);
+  await refreshManage();
+  await refreshProjects();
+}
+
 /** Commit the manage-title inline rename (no-op if unchanged/empty). */
 export async function commitManageRename(): Promise<void> {
   const name = appState.manage.renameText.trim();
@@ -452,8 +497,8 @@ async function executeSearch(): Promise<void> {
   const s = appState.search;
   const prefs: Preference[] = Object.values(s.preferences)
     .filter((p) => p.weight !== 0)
-    .map((p) => ({ text: p.hit.text, weight: p.weight }));
-  if (s.query.trim() === "" && prefs.length === 0) {
+    .map((p) => ({ text: p.hit.text, weight: p.weight, id: p.hit.index }));
+  if (s.query.trim() === "" && prefs.length === 0 && s.attachments.length === 0) {
     s.results = [];
     s.unsearched = true;
     return;
@@ -461,13 +506,20 @@ async function executeSearch(): Promise<void> {
   const myRun = ++s.runId;
   const parsed = parseQuery(s.query);
   s.literals = parsed.literals;
-  s.results = await searchProject(s.projectId, s.query, prefs, s.limit);
+  const attachments: QueryAttachment[] = s.attachments.map(({ kind, path, dataBase64, ext }) => ({
+    kind,
+    path,
+    dataBase64,
+    ext,
+  }));
+  s.results = await searchProject(s.projectId, s.query, prefs, s.limit, "exact", s.modalities, attachments);
   s.unsearched = false;
   s.explanations = {};
 
-  // Best-effort highlighting: explain against the semantic part of the query.
+  // Best-effort highlighting: explain text hits against the semantic part of
+  // the query (media hits have no tokens to attribute).
   const semantic = parsed.semantic.map((t) => t.text).join(" ").trim() || s.query;
-  const current = s.results;
+  const current = s.results.filter((r) => r.modality === "text" && r.text);
   explainMatches(semantic, current.map((r) => r.text))
     .then((exps) => {
       if (myRun !== s.runId) return;
@@ -476,6 +528,39 @@ async function executeSearch(): Promise<void> {
       s.explanations = map;
     })
     .catch((e) => console.warn("explain failed", e));
+}
+
+/** Toggle one result type in the filter and re-run the current search. */
+export async function toggleModality(m: Modality): Promise<void> {
+  const s = appState.search;
+  s.modalities = s.modalities.includes(m) ? s.modalities.filter((x) => x !== m) : [...s.modalities, m];
+  s.limit = SEARCH_LIMIT;
+  await executeSearch();
+}
+
+/** Clear the result-type filter (show every kind) and re-run. */
+export async function clearModalities(): Promise<void> {
+  appState.search.modalities = [];
+  appState.search.limit = SEARCH_LIMIT;
+  await executeSearch();
+}
+
+let nextAttachmentId = 1;
+
+/** Attach an image/audio (file or recording) to the query and re-search. */
+export async function addAttachment(a: Omit<SearchAttachment, "id">): Promise<void> {
+  const s = appState.search;
+  s.attachments = [...s.attachments, { ...a, id: nextAttachmentId++ }];
+  s.limit = SEARCH_LIMIT;
+  await executeSearch();
+}
+
+/** Remove a query attachment and re-search. */
+export async function removeAttachment(id: number): Promise<void> {
+  const s = appState.search;
+  s.attachments = s.attachments.filter((a) => a.id !== id);
+  s.limit = SEARCH_LIMIT;
+  await executeSearch();
 }
 
 /** Run a fresh search for `q` (resets the result cap). */

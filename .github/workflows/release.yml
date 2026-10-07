@@ -1,21 +1,20 @@
 name: Release
 
-# Builds signed/notarized macOS (Apple Silicon + Intel), Linux, and Windows
-# installers via tauri-action.
+# Builds the signed/notarized macOS (Apple Silicon) installer via tauri-action.
+# Semantra's embedding runtime is MLX (Metal), so Apple Silicon is the only
+# target.
 #
-#   • Push a tag `vX.Y.Z`  -> builds all platforms and uploads them to a DRAFT
-#                             GitHub Release named after the tag.
-#   • Run manually (Actions -> Release -> Run workflow) -> builds all platforms
-#                             and uploads the installers as workflow artifacts,
-#                             without creating a release. Use this as a dry run.
+#   • Push a tag `vX.Y.Z`  -> builds and uploads to a DRAFT GitHub Release.
+#   • Run manually (Actions -> Release -> Run workflow) -> builds and uploads the
+#                             installer as a workflow artifact (dry run).
 #
-# The embedding weights (~45 MB, gitignored) are fetched + quantized ONCE in the
-# `prepare-model` job and shared to every build job as an artifact, so we don't
-# hit Hugging Face / run Python four times.
+# The EmbeddingGemma 2 weights (~1.5 GB BF16, gitignored) are fetched ONCE in
+# the `prepare-model` job and shared to the build job as an artifact. They are
+# used as published — never converted to F16 (the model overflows F16).
 #
-# macOS signing is REQUIRED: the mac jobs read Developer ID + notarization
+# macOS signing is REQUIRED: the job reads Developer ID + notarization
 # credentials from repository secrets (see APPLE_* below). Missing secrets cause
-# the mac build to fail at the signing/notarization step — by design.
+# the build to fail at the signing/notarization step — by design.
 
 on:
   push:
@@ -29,39 +28,31 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Fetch + F16-quantize the active model once; share to build jobs as an
-  # artifact. The weights are platform-independent, so this avoids re-running
-  # the Python quantization on every (including Windows) runner.
+  # Fetch the model once and share it to the build job as an artifact.
   # ---------------------------------------------------------------------------
   prepare-model:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      # numpy + safetensors power src-tauri/quantize-model.py (F32 -> F16).
-      - name: Install quantization deps
-        run: pip install numpy safetensors
-
-      # Fetches from Hugging Face into src-tauri/models/mdbr-leaf-mt/ and
-      # quantizes the BERT weights in place. Must match MODEL_NAME in lib.rs.
-      - name: Fetch + quantize mdbr-leaf-mt
-        run: bash src-tauri/fetch-model.sh mdbr-leaf-mt
+      # Downloads google/embeddinggemma-2 into src-tauri/models/embeddinggemma-2/.
+      # Must match MODEL_NAME in lib.rs. HF_TOKEN is optional (rate limits).
+      - name: Fetch embeddinggemma-2
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: bash src-tauri/fetch-model.sh
 
       - name: Upload model artifact
         uses: actions/upload-artifact@v4
         with:
-          name: model-mdbr-leaf-mt
-          path: src-tauri/models/mdbr-leaf-mt
+          name: model-embeddinggemma-2
+          path: src-tauri/models/embeddinggemma-2
           retention-days: 1
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Build the app for each platform. macOS is built per-arch on its native
-  # runner (no cross-compile of the Accelerate/Metal candle path).
+  # Build the app on an Apple Silicon runner (MLX compiles its Metal kernels
+  # with the Xcode toolchain, so no cross-compilation).
   # ---------------------------------------------------------------------------
   build:
     needs: prepare-model
@@ -69,47 +60,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # One universal-apple-darwin DMG covering Intel + Apple Silicon, built
-          # on the Apple Silicon runner. GitHub is retiring Intel (macos-13)
-          # runners, so rather than a separate Intel job we fuse both arch slices
-          # with lipo. `universal-apple-darwin` isn't a real rustup target, so
-          # toolchain_targets installs the two real targets it's built from.
-          - name: macOS (Universal)
-            os: macos-14
-            rust_target: universal-apple-darwin
-            toolchain_targets: aarch64-apple-darwin,x86_64-apple-darwin
-            args: "--target universal-apple-darwin"
-          - name: Linux (x86_64)
-            os: ubuntu-22.04
-            rust_target: x86_64-unknown-linux-gnu
-            toolchain_targets: x86_64-unknown-linux-gnu
-            args: ""
-          - name: Windows (x86_64)
-            os: windows-latest
-            rust_target: x86_64-pc-windows-msvc
-            toolchain_targets: x86_64-pc-windows-msvc
-            args: ""
+          - name: macOS (Apple Silicon)
+            os: macos-26
+            rust_target: aarch64-apple-darwin
+            toolchain_targets: aarch64-apple-darwin
+            args: "--target aarch64-apple-darwin"
 
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      # Tauri's Linux runtime/build deps (webkit2gtk 4.1, GTK, appindicator,
-      # rsvg) plus patchelf for AppImage. No-op on macOS/Windows.
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+      # MLX (built from source by mlx-sys via CMake) compiles Metal shaders;
+      # Xcode 26 ships the Metal toolchain as a separate download. The macOS 26
+      # SDK is also required to target macOS 26.2 (bundle.macOS
+      # .minimumSystemVersion), which enables MLX's M5 neural-accelerator
+      # kernels.
+      - name: Install Metal toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            build-essential \
-            file \
-            libssl-dev \
-            libsoup-3.0-dev
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -downloadComponent MetalToolchain
 
       # The lance/datafusion stack runs `protoc` at build time to codegen its
       # protobuf types. Not preinstalled on the runners; this action installs it
@@ -124,7 +94,7 @@ jobs:
         with:
           targets: ${{ matrix.toolchain_targets }}
 
-      # Cache the (large) Rust dependency build — datafusion/lance/candle dominate
+      # Cache the (large) Rust dependency build — datafusion/lance/MLX dominate
       # compile time. Scoped to the src-tauri crate.
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -145,13 +115,13 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      # Restore the shared, pre-quantized weights so the bundle resource
-      # (models/mdbr-leaf-mt/**) is present at build time.
+      # Restore the shared weights so the bundle resource
+      # (models/embeddinggemma-2/*) is present at build time.
       - name: Download model artifact
         uses: actions/download-artifact@v4
         with:
-          name: model-mdbr-leaf-mt
-          path: src-tauri/models/mdbr-leaf-mt
+          name: model-embeddinggemma-2
+          path: src-tauri/models/embeddinggemma-2
 
       # Notarization requires EVERY Mach-O in the bundle to be Developer-ID-signed
       # with a secure timestamp. Tauri signs the main binary + the .app, but the
@@ -159,8 +129,7 @@ jobs:
       # so the notary rejects the whole archive. Fix: fetch + sign the dylib here
       # and drop it where build.rs caches it (build.rs skips the download when the
       # file already exists), so the bundle picks up the signed copy. macOS only.
-      - name: Pre-sign bundled libpdfium (macOS)
-        if: runner.os == 'macOS'
+      - name: Pre-sign bundled libpdfium
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -171,32 +140,9 @@ jobs:
           PDFIUM_TAG="chromium%2F7881"
           BASE="https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}"
           mkdir -p src-tauri/libpdfium
-          # For the universal build, fetch BOTH arch dylibs and lipo them into one
-          # fat dylib so the single bundled resource is valid for both slices.
-          # build.rs runs per-arch but skips the download when this file exists,
-          # so both arch builds pick up the signed universal dylib.
-          fetch() { # $1 = archive, $2 = dest dir
-            curl -fSL --retry 3 -o "$RUNNER_TEMP/$1" "$BASE/$1"
-            mkdir -p "$RUNNER_TEMP/$2"
-            tar xzf "$RUNNER_TEMP/$1" -C "$RUNNER_TEMP/$2" lib/libpdfium.dylib
-          }
-          case "${{ matrix.rust_target }}" in
-            aarch64-apple-darwin)
-              fetch pdfium-mac-arm64.tgz arm
-              cp "$RUNNER_TEMP/arm/lib/libpdfium.dylib" src-tauri/libpdfium/libpdfium.dylib ;;
-            x86_64-apple-darwin)
-              fetch pdfium-mac-x64.tgz x64
-              cp "$RUNNER_TEMP/x64/lib/libpdfium.dylib" src-tauri/libpdfium/libpdfium.dylib ;;
-            universal-apple-darwin)
-              fetch pdfium-mac-arm64.tgz arm
-              fetch pdfium-mac-x64.tgz x64
-              lipo -create \
-                "$RUNNER_TEMP/arm/lib/libpdfium.dylib" \
-                "$RUNNER_TEMP/x64/lib/libpdfium.dylib" \
-                -output src-tauri/libpdfium/libpdfium.dylib
-              echo "--- fat libpdfium archs ---"; lipo -archs src-tauri/libpdfium/libpdfium.dylib ;;
-            *) echo "unexpected target ${{ matrix.rust_target }}"; exit 1 ;;
-          esac
+          curl -fSL --retry 3 -o "$RUNNER_TEMP/pdfium.tgz" "$BASE/pdfium-mac-arm64.tgz"
+          tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP" lib/libpdfium.dylib
+          cp "$RUNNER_TEMP/lib/libpdfium.dylib" src-tauri/libpdfium/libpdfium.dylib
 
           # Import the Developer ID cert into a dedicated keychain so codesign can
           # find the identity (tauri-action's own keychain isn't set up yet).
@@ -243,18 +189,13 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
-      # Dry-run convenience: when not building a release, surface the installers
-      # as downloadable workflow artifacts so they can be inspected/tested. The
-      # two globs cover both bundle layouts: `target/<triple>/release/bundle`
-      # when `--target` is passed (macOS) and `target/release/bundle` otherwise
-      # (Linux/Windows). Only one exists per job; the other is silently empty.
+      # Dry-run convenience: when not building a release, surface the installer
+      # as a downloadable workflow artifact so it can be inspected/tested.
       - name: Upload installers (manual runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         uses: actions/upload-artifact@v4
         with:
           name: installers-${{ matrix.rust_target }}
-          path: |
-            src-tauri/target/${{ matrix.rust_target }}/release/bundle/**/*
-            src-tauri/target/release/bundle/**/*
+          path: src-tauri/target/${{ matrix.rust_target }}/release/bundle/**/*
           retention-days: 7
           if-no-files-found: warn

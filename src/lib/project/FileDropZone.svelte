@@ -46,8 +46,14 @@
       directory: false,
       filters: [
         {
-          name: "Documents",
-          extensions: ["pdf", "txt", "md", "markdown", "text", "csv", "tsv", "log", "json"],
+          name: "Documents & media",
+          extensions: [
+            "pdf", "txt", "md", "markdown", "text", "csv", "tsv", "log", "json",
+            "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "bmp", "tif", "tiff",
+            "dng", "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2",
+            "mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "flac", "m4b",
+            "mp4", "mov", "m4v", "3gp",
+          ],
         },
         { name: "All Files", extensions: ["*"] },
       ],
@@ -74,7 +80,7 @@
     <path d="M4 20h16" />
   </svg>
   <span class="dz-title">{busy ? busyLabel : label}</span>
-  <span class="dz-sub">PDFs, text, markdown, CSV, and more</span>
+  <span class="dz-sub">PDFs, text, CSV, images, audio, and video</span>
 </button>
 
 <style>

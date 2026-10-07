@@ -4,7 +4,14 @@
   // excerpts) — plus an expand/collapse-all control (file view) and a filter
   // toggle. The toggle reveals a panel with the filename filter and a "filter to
   // the current file" button. Grouping/excerpt are derived subviews on appState.
-  import { appState, loadMoreResults, scorePercent } from "$lib/state.svelte";
+  import {
+    appState,
+    clearModalities,
+    loadMoreResults,
+    scorePercent,
+    toggleModality,
+  } from "$lib/state.svelte";
+  import type { Modality } from "./projectClient";
   import SearchResult from "./SearchResult.svelte";
 
   const search = appState.search;
@@ -12,7 +19,33 @@
   // Whether the filter panel is exposed. Opens automatically once a filter is
   // active so the active filter stays visible after a reload.
   let filterOpen = $state(false);
-  const filterActive = $derived(search.filenameFilter !== "" || search.filterViewed);
+  const filterActive = $derived(
+    search.filenameFilter !== "" || search.filterViewed || search.modalities.length > 0,
+  );
+
+  // Result-type filter labels. "Pages" when the project has PDFs, whose page
+  // renders are image-modality hits alongside any photos.
+  const typeLabel = (m: Modality): string =>
+    m === "text"
+      ? "Text"
+      : m === "image"
+        ? search.docs.some((d) => d.filetype === "pdf")
+          ? search.docs.some((d) => d.filetype === "image")
+            ? "Pages & images"
+            : "Pages"
+          : "Images"
+        : m === "video"
+          ? "Video"
+          : "Audio";
+
+  /** Toggle a type; selecting every type is the same as "All". */
+  function pickType(m: Modality) {
+    const next = search.modalities.includes(m)
+      ? search.modalities.filter((x) => x !== m)
+      : [...search.modalities, m];
+    if (next.length === 0 || next.length === appState.searchModalities.length) clearModalities();
+    else toggleModality(m);
+  }
 
   let loadingMore = $state(false);
   async function more() {
@@ -110,6 +143,29 @@
         {search.filterViewed ? "Show all files" : "Filter to current file"}
       </button>
     </div>
+    {#if appState.searchModalities.length > 1}
+      <div
+        class="flex items-center gap-2 px-2 py-2 border-b flex-shrink-0"
+        style="border-color: var(--color-border-soft);"
+      >
+        <span class="text-xs" style="color: var(--color-text-muted);">Show</span>
+        <div class="segmented" role="group" aria-label="Result types">
+          <button class="seg" class:active={search.modalities.length === 0} onclick={clearModalities}>
+            All
+          </button>
+          {#each appState.searchModalities as m (m)}
+            <button
+              class="seg"
+              class:active={search.modalities.includes(m)}
+              aria-pressed={search.modalities.includes(m)}
+              onclick={() => pickType(m)}
+            >
+              {typeLabel(m)}
+            </button>
+          {/each}
+        </div>
+      </div>
+    {/if}
   {/if}
 
   <!-- List -->
@@ -123,6 +179,9 @@
         <div class="m-2 font-mono text-sm" style="color: var(--color-text-muted);">
           {#if appState.searchIndexing}
             No results yet — documents are still indexing…
+          {:else if search.modalities.length > 0}
+            No {search.modalities.map(typeLabel).join(" / ").toLowerCase()} results.
+            <button class="underline" onclick={clearModalities}>Show all types</button>
           {:else}
             No search results
           {/if}

@@ -4,32 +4,31 @@ pub mod chunk;
 mod embed;
 pub mod extract;
 mod explain;
+pub mod media;
 pub mod pdf;
 pub mod query;
 pub mod store;
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use catalog::{Catalog, FileRecord, Job, JOB_PENDING};
-use chunk::{CellChunker, Chunk, Chunker, WordWindowChunker};
-use embed::{embed_chunks_with_vectors, EmbedProgress, BATCH_SIZE};
-use leaf_ir_candle_test::{
-    embed_sentences, explain_similarity_batch, setup_model, warmup, ModelCtx, QUERY_PREFIX,
-};
+use chunk::{CellChunker, Chunk, Chunker, TokenWindowChunker};
+use embed::{plan_batches, BATCH_TOKENS, MAX_BATCH_ROWS};
 use pdfium_render::prelude::Pdfium;
+use semantra_embed::{document_prompt, EmbedService, Lane, QUERY_PREFIX};
 use sha2::{Digest, Sha512};
-use store::{ChunkRow, SearchMode, VectorStore};
+use store::{ChunkRow, Modality, SearchMode, VectorStore};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::Notify;
 
-// The embedding model is loaded once at startup and kept in Tauri managed
-// state. `ModelCtx` holds candle tensors + the tokenizer and is not `Sync`, so
-// we guard it with a `Mutex`. The `Arc` lets a handle be cloned into the
-// blocking inference task without borrowing the (non-'static) `State`.
-type SharedModel = Arc<Mutex<ModelCtx>>;
+// The embedding model lives on its own inference thread (MLX state is
+// per-thread); `EmbedService` is a cheap, cloneable handle to it, managed
+// directly as Tauri state. Interactive work (search, explain) goes on its
+// priority lane, indexing on the background lane.
 
 // The vector store is async (LanceDB) and single-writer, so an async `Mutex`
 // guards it directly in managed state.
@@ -82,34 +81,39 @@ const INSERT_BATCH: usize = 1024;
 // large import without paying the rebuild cost on every file.
 const MAINTENANCE_ROW_THRESHOLD: usize = 50_000;
 
-/// Words per chunk for background indexing, and the rewind/overlap shared
-/// between consecutive windows. Both are baked into [`pipeline_version`], so
-/// changing either auto-invalidates on-disk vectors and triggers re-indexing.
-const DEFAULT_CHUNK_SIZE: usize = 50;
-const DEFAULT_CHUNK_OVERLAP: usize = 10;
+/// Tokens per text chunk (excluding the document prompt) and the rewind shared
+/// between consecutive windows. Chosen by a retrieval eval (SQuAD articles as
+/// documents): quality is flat from 64 to 256 tokens and dips beyond, while
+/// 256 halves the vector count vs 128. Both are baked into
+/// [`pipeline_version`], so changing either triggers re-indexing.
+const CHUNK_TOKENS: usize = 256;
+const CHUNK_OVERLAP_TOKENS: usize = 32;
 
-/// Which embedding model to load. The model files live under
-/// `models/<MODEL_NAME>/` (bundled as a resource and in the dev tree). This is
-/// the switch for the active model: flipping it loads the new weights and
-/// changes [`pipeline_version`] (so the DB detects the change and re-indexes on
-/// next startup). The store sizes itself to the model's embedding dim.
-///
-/// Note: `tauri.conf.json` only bundles the *active* model dir
-/// (`models/mdbr-leaf-mt/**`) to keep the app bundle small — the other model
-/// dirs stay in the dev tree but are not shipped. So switching to a different
-/// model also requires updating the `resources` glob in `tauri.conf.json`.
-///
-/// Known good values: `"mdbr-leaf-ir"` (768-d retrieval), `"mdbr-leaf-mt"`
-/// (1024-d multi-task).
-pub const MODEL_NAME: &str = "mdbr-leaf-mt";
+/// The embedding model directory under `models/` (bundled as a resource and in
+/// the dev tree): a copy of `google/embeddinggemma-2` (see fetch-model.sh).
+pub const MODEL_NAME: &str = "embeddinggemma-2";
+
+/// Matryoshka output width. 768 is the model's native size; 512/256 trade a
+/// little quality for 1.5x/3x smaller vectors.
+pub const EMBED_DIM: usize = 768;
 
 /// Identifies the chunking + embedding approach that produced a file's chunks,
 /// stored per file/chunk so a change can be detected and stale data re-indexed.
-/// Derived from [`MODEL_NAME`] and the chunk geometry, so switching models OR
-/// changing the chunk size/overlap invalidates old vectors automatically. Bump
-/// the `v1` schema rev by hand only for changes not already captured here.
+/// Derived from the model, output width, prompt and chunk geometry, so changing
+/// any of them invalidates old vectors automatically. Bump the schema rev by
+/// hand only for changes not already captured here (v2: store schema; v3: PDF
+/// page renders at full resolution instead of PDFium's 72 dpi default).
 pub fn pipeline_version() -> String {
-    format!("v1:{MODEL_NAME}:wordwindow:{DEFAULT_CHUNK_SIZE}-{DEFAULT_CHUNK_OVERLAP}")
+    format!(
+        "v3:{MODEL_NAME}@{EMBED_DIM}:bf16:prompt-none:tokenwindow:{CHUNK_TOKENS}-{CHUNK_OVERLAP_TOKENS}"
+    )
+}
+
+/// The document prompt every text chunk is embedded with. Titles (file names)
+/// measured as a wash for retrieval, and leaving them out keeps a chunk's vector
+/// independent of what its file is called.
+fn doc_prompt() -> String {
+    document_prompt(None)
 }
 
 /// `db_meta` key under which the [`pipeline_version`] the on-disk vectors were
@@ -177,67 +181,81 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Embed `chunks` (with their metadata) and insert them into the store, pipelining
-/// blocking inference into async inserts over a bounded channel. Progress is
-/// delivered through a plain sink (`Channel::send` in a command, a Tauri event
-/// emit in the background worker), so the pipeline stays transport-agnostic.
+/// Embed `chunks` (with their metadata) and insert them into the store.
+///
+/// Chunks are sorted by token length and packed into token-budgeted batches
+/// (see [`plan_batches`]) that run on the inference thread's background lane.
+/// Two batches are kept in flight so the GPU never idles while a finished batch
+/// is converted and inserted. `report` receives the cumulative number of
+/// chunks embedded so far.
 async fn run_index_pipeline(
-    model: SharedModel,
+    embedder: &EmbedService,
     store: &SharedStore,
     chunks: Vec<Chunk>,
     sha512: String,
-    on_progress: Arc<dyn Fn(EmbedProgress) + Send + Sync>,
+    report: &(dyn Fn(usize) + Send + Sync),
 ) -> Result<(), String> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<ChunkRow>>(4);
-    let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
-    let chunks = Arc::new(chunks);
-    let chunks_for_producer = Arc::clone(&chunks);
+    let prompt = doc_prompt();
+    let inputs: Arc<Vec<String>> =
+        Arc::new(chunks.iter().map(|c| format!("{prompt}{}", c.text)).collect());
+    let tokenizer = Arc::clone(embedder.tokenizer());
+    let for_lens = Arc::clone(&inputs);
+    let lens = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<usize>, String> {
+        let enc = tokenizer
+            .encode_batch(for_lens.to_vec(), true)
+            .map_err(|e| format!("tokenize chunks: {e}"))?;
+        // The shared tokenizer pads batches (BatchLongest), so count real
+        // tokens from the attention mask, not `len()` (the padded length).
+        Ok(enc.iter().map(|e| e.get_attention_mask().iter().filter(|&&m| m == 1).count()).collect())
+    })
+    .await
+    .map_err(|e| format!("tokenize task panicked: {e}"))??;
+    let batches = plan_batches(&lens, BATCH_TOKENS, MAX_BATCH_ROWS);
 
-    let producer = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        embed_chunks_with_vectors(
-            // Lock the shared model per batch (not once for the whole file), so a
-            // concurrent search query can embed between our batches instead of
-            // blocking until the entire document finishes indexing.
-            |inputs: &[String]| -> Result<Vec<Vec<f32>>, String> {
-                let ctx = model.lock().map_err(|_| "model mutex poisoned".to_string())?;
-                Ok(embed_sentences(&ctx, inputs).map_err(|e| e.to_string())?.rows)
-            },
-            texts,
-            false, // documents, not queries
-            BATCH_SIZE,
-            |start, _batch_texts, vectors| {
-                let mut rows = Vec::with_capacity(vectors.len());
-                for (j, vector) in vectors.into_iter().enumerate() {
-                    let c = &chunks_for_producer[start + j];
-                    rows.push(ChunkRow {
-                        sha512: sha512.clone(),
-                        text: c.text.clone(),
-                        char_start: c.char_start as i64,
-                        char_end: c.char_end as i64,
-                        page: c.page.map(|p| p as i64),
-                        page_char_start: c.page_char_start as i64,
-                        pipeline_version: pipeline_version(),
-                        vector,
-                    });
-                }
-                tx.blocking_send(rows).map_err(|_| "index inserter stopped".to_string())
-            },
-            |p| {
-                on_progress(p);
-            },
-        )
-    });
+    let submit = |batch: &[usize]| {
+        let rows: Vec<String> = batch.iter().map(|&i| inputs[i].clone()).collect();
+        embedder.submit(Lane::Background, move |m| Ok(m.embed_texts(&rows)?.rows))
+    };
+    let mut queued = batches.iter();
+    let mut in_flight = VecDeque::new();
+    for b in queued.by_ref().take(2) {
+        in_flight.push_back((b, submit(b)));
+    }
 
-    // Lock the store only for each insert (not across the embedding waits in
-    // between), so background indexing doesn't block concurrent searches/reads
-    // for the whole file — the project stays usable while it indexes.
     let mut buf: Vec<ChunkRow> = Vec::new();
-    while let Some(rows) = rx.recv().await {
-        buf.extend(rows);
+    let mut done = 0usize;
+    while let Some((batch, rx)) = in_flight.pop_front() {
+        let vectors = rx
+            .await
+            .map_err(|_| "embedding thread stopped".to_string())?
+            .map_err(|e| e.to_string())?;
+        if let Some(b) = queued.next() {
+            in_flight.push_back((b, submit(b)));
+        }
+        for (&i, vector) in batch.iter().zip(vectors) {
+            let c = &chunks[i];
+            buf.push(ChunkRow {
+                sha512: sha512.clone(),
+                modality: Modality::Text,
+                text: c.text.clone(),
+                char_start: c.char_start as i64,
+                char_end: c.char_end as i64,
+                page: c.page.map(|p| p as i64),
+                page_char_start: c.page_char_start as i64,
+                time_start_ms: None,
+                time_end_ms: None,
+                pipeline_version: pipeline_version(),
+                vector,
+            });
+        }
+        // Lock the store only for each insert (not across the embedding waits
+        // in between), so indexing doesn't block concurrent searches/reads.
         if buf.len() >= INSERT_BATCH {
             store.lock().await.insert(&buf).await?;
             buf.clear();
         }
+        done += batch.len();
+        report(done);
     }
     if !buf.is_empty() {
         store.lock().await.insert(&buf).await?;
@@ -246,10 +264,54 @@ async fn run_index_pipeline(
     // rebuilds over the whole table, so running them per file makes a multi-file
     // import O(files²). The worker refreshes them off this hot path — once when
     // the queue drains and occasionally mid-run (see `index_worker`).
+    Ok(())
+}
 
+/// Embed a file's media units (PDF page renders, images, audio/video windows;
+/// see `media.rs`) and insert them. Decoding runs on a blocking thread that
+/// streams rows to this task; `report` receives cumulative units embedded.
+async fn run_media_pipeline(
+    app: &AppHandle,
+    store: &SharedStore,
+    plan: media::Plan,
+    copied_path: String,
+    sha512: String,
+    report: Arc<dyn Fn(usize) + Send + Sync>,
+) -> Result<(), String> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<ChunkRow>>(4);
+    let embedder = (*app.state::<EmbedService>()).clone();
+    let pdfium = (*app.state::<SharedPdfium>()).clone();
+    let producer = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut done = 0usize;
+        media::run(plan, &copied_path, &pdfium, &embedder, |rows, units| {
+            let rows = rows
+                .into_iter()
+                .map(|r| ChunkRow {
+                    sha512: sha512.clone(),
+                    modality: r.modality,
+                    text: String::new(),
+                    char_start: 0,
+                    char_end: 0,
+                    page: r.page,
+                    page_char_start: 0,
+                    time_start_ms: r.time_ms.map(|t| t.0),
+                    time_end_ms: r.time_ms.map(|t| t.1),
+                    pipeline_version: pipeline_version(),
+                    vector: r.vector,
+                })
+                .collect();
+            tx.blocking_send(rows).map_err(|_| "media inserter stopped".to_string())?;
+            done += units;
+            report(done);
+            Ok(())
+        })
+    });
+    while let Some(rows) = rx.recv().await {
+        store.lock().await.insert(&rows).await?;
+    }
     producer
         .await
-        .map_err(|e| format!("embedding task panicked: {e}"))??;
+        .map_err(|e| format!("media task panicked: {e}"))??;
     Ok(())
 }
 
@@ -336,13 +398,17 @@ async fn add_files_to_project(
     for path in paths {
         let src = path.clone();
         let dir = files_dir.clone();
-        // Read + hash + copy into the content-addressed store on a blocking thread.
+        // Hash + copy into the content-addressed store on a blocking thread.
         // The copy target name is deterministic (`<sha>[.ext]`), so re-copying
         // identical bytes is harmless.
         let (sha512, basename, ext, copied_path) =
             tauri::async_runtime::spawn_blocking(move || -> Result<(String, String, String, String), String> {
-                let bytes = std::fs::read(&src).map_err(|e| format!("read {src}: {e}"))?;
-                let sha512 = hex(&Sha512::digest(&bytes));
+                // Stream the hash (multi-GB videos are accepted, so never read
+                // the whole file into memory).
+                let mut hasher = Sha512::new();
+                let mut file = std::fs::File::open(&src).map_err(|e| format!("read {src}: {e}"))?;
+                std::io::copy(&mut file, &mut hasher).map_err(|e| format!("read {src}: {e}"))?;
+                let sha512 = hex(&hasher.finalize());
                 let p = std::path::Path::new(&src);
                 let basename = p
                     .file_name()
@@ -357,7 +423,15 @@ async fn add_files_to_project(
                 } else {
                     format!("{sha512}.{ext}")
                 });
-                std::fs::write(&copied, &bytes).map_err(|e| format!("copy into app dir: {e}"))?;
+                // `fs::copy` clones on APFS (copy-on-write: instant, no extra
+                // disk); skip it entirely if these bytes are already stored.
+                // Copy to a temp name and rename, so an interrupted copy never
+                // leaves a truncated file that a later import would trust.
+                if !copied.exists() {
+                    let tmp = copied.with_extension("partial");
+                    std::fs::copy(&src, &tmp).map_err(|e| format!("copy into app dir: {e}"))?;
+                    std::fs::rename(&tmp, &copied).map_err(|e| format!("copy into app dir: {e}"))?;
+                }
                 Ok((sha512, basename, ext, copied.to_string_lossy().to_string()))
             })
             .await
@@ -414,6 +488,20 @@ async fn delete_file_from_project(
         store.lock().await.delete_file(&sha512).await?;
         remove_file_bytes(&app_paths.files_dir, &sha512);
     }
+    Ok(())
+}
+
+/// Retry a file whose indexing failed: flip its job back to pending and wake
+/// the worker.
+#[tauri::command]
+async fn retry_file(
+    catalog: State<'_, SharedCatalog>,
+    notify: State<'_, SharedNotify>,
+    project_id: String,
+    sha512: String,
+) -> Result<(), String> {
+    catalog.lock().await.set_job_pending(&project_id, &sha512).await?;
+    notify.notify_one();
     Ok(())
 }
 
@@ -545,20 +633,18 @@ fn remove_file_bytes(files_dir: &std::path::Path, sha512: &str) {
     }
 }
 
-/// Build the progress sink handed to [`run_index_pipeline`]: it updates the
-/// shared active snapshot and emits a `progress` event per batch.
+/// Build the progress sink for a file of `total` units (text chunks + media
+/// units): it updates the shared active snapshot and emits a `progress` event
+/// per batch. Called with the cumulative units done.
 fn progress_sink(
     app: AppHandle,
     active: SharedActive,
     job: Job,
     queue_remaining: usize,
-) -> Arc<dyn Fn(EmbedProgress) + Send + Sync> {
-    Arc::new(move |p: EmbedProgress| {
-        let (done, total) = match &p {
-            EmbedProgress::Started { total_chunks, .. } => (0, *total_chunks),
-            EmbedProgress::Batch { chunks_done, total_chunks, .. } => (*chunks_done, *total_chunks),
-            EmbedProgress::Finished { total_chunks, .. } => (*total_chunks, *total_chunks),
-        };
+    total: usize,
+) -> Arc<dyn Fn(usize) + Send + Sync> {
+    Arc::new(move |done: usize| {
+        let done = done.min(total);
         if let Ok(mut g) = active.lock() {
             if let Some(a) = g.as_mut() {
                 if a.sha512 == job.sha512 {
@@ -690,16 +776,59 @@ async fn process_job(app: &AppHandle, job: &Job) -> Result<(), String> {
         .unwrap_or(0);
 
     // CSVs index one chunk per cell (the segments are already cells); everything
-    // else uses fixed word windows.
-    let chunks = match filetype {
-        extract::FileType::Csv => CellChunker.chunk(&extracted.segments),
-        _ => WordWindowChunker::new(DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP)
-            .chunk(&extracted.segments),
+    // else uses token windows sized by the model's own tokenizer.
+    let embedder = (*app.state::<EmbedService>()).clone();
+    let tokenizer = Arc::clone(embedder.tokenizer());
+    // The media planner only needs page texts (to budget PDF page renders).
+    let extracted_meta = extract::Extracted {
+        filetype,
+        full_text: String::new(),
+        segments: extracted.segments.clone(),
+        page_count: extracted.page_count,
     };
+    let chunks = tauri::async_runtime::spawn_blocking(move || match filetype {
+        extract::FileType::Csv => CellChunker.chunk(&extracted.segments),
+        _ => TokenWindowChunker::new(CHUNK_TOKENS, CHUNK_OVERLAP_TOKENS, |text: &str| {
+            match tokenizer.encode(text, false) {
+                Ok(e) => e.get_offsets().iter().map(|o| o.0).collect(),
+                Err(e) => {
+                    // Falls back to ~1 token per word; inputs are still capped
+                    // by the model's truncation (MAX_INPUT_TOKENS).
+                    eprintln!("[semantra] tokenize segment for chunking failed: {e}");
+                    Vec::new()
+                }
+            }
+        })
+        .chunk(&extracted.segments),
+    })
+    .await
+    .map_err(|e| format!("chunk task panicked: {e}"))?;
 
-    let model = (*app.state::<SharedModel>()).clone();
-    let sink = progress_sink((*app).clone(), (*active).clone(), job.clone(), queue_remaining);
-    run_index_pipeline(model, &store, chunks, job.sha512.clone(), sink).await?;
+    // Media pass (PDF page renders, images, audio/video windows): planned up
+    // front so one progress total covers text + media.
+    let copied = job.copied_path.clone();
+    let plan = tauri::async_runtime::spawn_blocking(move || media::plan(filetype, &copied, &extracted_meta))
+        .await
+        .map_err(|e| format!("media plan task panicked: {e}"))??;
+    let n_text = chunks.len();
+    let total = n_text + plan.units();
+    let sink = progress_sink((*app).clone(), (*active).clone(), job.clone(), queue_remaining, total);
+    sink(0);
+    run_index_pipeline(&embedder, &store, chunks, job.sha512.clone(), &*sink).await?;
+    let media_sink: Arc<dyn Fn(usize) + Send + Sync> = {
+        let sink = Arc::clone(&sink);
+        Arc::new(move |done| sink(n_text + done))
+    };
+    let media = run_media_pipeline(app, &store, plan, job.copied_path.clone(), job.sha512.clone(), media_sink).await;
+    match media {
+        // A PDF's page renders are a bonus on top of its text: if they fail
+        // (an unrenderable page, a checkpoint without the vision tower), keep
+        // the text index rather than failing the whole file.
+        Err(e) if filetype == extract::FileType::Pdf => {
+            eprintln!("[semantra] {}: page images skipped: {e}", job.basename);
+        }
+        other => other?,
+    }
 
     // Cancelled (file deleted from the project) while embedding? Discard the work.
     if !catalog.lock().await.job_exists(&job.project_id, &job.sha512).await? {
@@ -742,28 +871,29 @@ fn app_paths_dir(app: &AppHandle) -> PathBuf {
 /// Explain why each chunk in `texts` matched `query` (per-token attribution).
 #[tauri::command]
 async fn explain_matches(
-    model: State<'_, SharedModel>,
+    embedder: State<'_, EmbedService>,
     query: String,
     texts: Vec<String>,
 ) -> Result<Vec<explain::Explanation>, String> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    let model = Arc::clone(model.inner());
     let prefixed = format!("{QUERY_PREFIX}{query}");
-    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<explain::Explanation>, String> {
-        let ctx = model.lock().map_err(|_| "model mutex poisoned".to_string())?;
-        let qvec = embed_sentences(&ctx, &[prefixed])
-            .map_err(|e| e.to_string())?
-            .rows
-            .into_iter()
-            .next()
-            .ok_or_else(|| "query produced no embedding".to_string())?;
-        let core = explain_similarity_batch(&ctx, &qvec, &texts).map_err(|e| e.to_string())?;
-        Ok(core.into_iter().map(Into::into).collect())
-    })
-    .await
-    .map_err(|e| format!("explain task panicked: {e}"))?
+    let prompt = doc_prompt();
+    embedder
+        .run(Lane::Priority, move |m| {
+            let qvec = m
+                .embed_texts(&[prefixed])?
+                .rows
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("query produced no embedding"))?;
+            let docs: Vec<(String, String)> = texts.into_iter().map(|t| (prompt.clone(), t)).collect();
+            let core = m.explain_similarity_batch(&qvec, &docs)?;
+            Ok(core.into_iter().map(Into::into).collect())
+        })
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Delete a project entirely: drop its membership + outstanding jobs, then GC the
@@ -811,6 +941,8 @@ struct ProjectHit {
     sha512: String,
     basename: String,
     filetype: String,
+    /// What this hit's vector embeds (text, image/page render, audio, video).
+    modality: Modality,
     text: String,
     distance: f32,
     score: f32,
@@ -818,6 +950,9 @@ struct ProjectHit {
     char_end: i64,
     page: Option<i64>,
     page_char_start: i64,
+    /// Audio/video window span in milliseconds.
+    time_start_ms: Option<i64>,
+    time_end_ms: Option<i64>,
 }
 
 /// A highlight overlay for one PDF page: rectangles in PDF user-space points
@@ -885,6 +1020,94 @@ async fn get_pdf_src(catalog: State<'_, SharedCatalog>, sha512: String) -> Resul
         .await?
         .ok_or_else(|| format!("unknown file {sha512}"))?;
     Ok(file.copied_path)
+}
+
+/// A small JPEG preview as a `data:` URL: a PDF page (`page`), a video frame
+/// (`time_ms`), or the image itself — also how formats the webview can't
+/// display (camera RAW, JPEG 2000) are shown. Longer side `max_side` px.
+#[tauri::command]
+async fn get_thumbnail(
+    catalog: State<'_, SharedCatalog>,
+    pdfium: State<'_, SharedPdfium>,
+    sha512: String,
+    page: Option<usize>,
+    time_ms: Option<i64>,
+    max_side: u32,
+) -> Result<String, String> {
+    use base64::Engine;
+    use semantra_embed::media::{av, image};
+    let file = catalog
+        .lock()
+        .await
+        .get_file(&sha512)
+        .await?
+        .ok_or_else(|| format!("unknown file {sha512}"))?;
+    let pdfium = Arc::clone(pdfium.inner());
+    let max_side = max_side.clamp(32, 2048);
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let path = std::path::Path::new(&file.copied_path);
+        let rgb = match (extract::FileType::parse(&file.filetype)?, page, time_ms) {
+            (extract::FileType::Pdf, Some(p), _) => pdf::render_page(&pdfium, &file.copied_path, p, max_side)?,
+            (extract::FileType::Video, _, t) => {
+                let secs = t.unwrap_or(0) as f64 / 1000.0;
+                av::frames_at(path, &[secs], max_side, 0.5)
+                    .map_err(|e| e.to_string())?
+                    .pop()
+                    .ok_or("no frame")?
+            }
+            (extract::FileType::Image, _, _) => image::decode_max(path, max_side).map_err(|e| e.to_string())?,
+            (ft, _, _) => return Err(format!("no thumbnail for {}", ft.as_str())),
+        };
+        let jpeg = image::encode_jpeg(&rgb, 0.82).map_err(|e| e.to_string())?;
+        Ok(format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(jpeg)
+        ))
+    })
+    .await
+    .map_err(|e| format!("thumbnail task panicked: {e}"))?
+}
+
+/// Peak amplitude (0–1) of the file's first audio track in `buckets` equal
+/// time slices, for the player's waveform. Streams the decode, so long
+/// recordings never sit in memory.
+#[tauri::command]
+async fn get_waveform(
+    catalog: State<'_, SharedCatalog>,
+    sha512: String,
+    buckets: usize,
+) -> Result<Vec<f32>, String> {
+    use semantra_embed::media::{av, mel};
+    let file = catalog
+        .lock()
+        .await
+        .get_file(&sha512)
+        .await?
+        .ok_or_else(|| format!("unknown file {sha512}"))?;
+    let buckets = buckets.clamp(1, 8192);
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<f32>, String> {
+        let path = std::path::Path::new(&file.copied_path);
+        let probe = av::probe(path).map_err(|e| e.to_string())?;
+        if !probe.has_audio {
+            return Ok(Vec::new());
+        }
+        let total = (probe.duration_s * mel::SAMPLE_RATE as f64).max(1.0);
+        let per = (total / buckets as f64).max(1.0);
+        let mut peaks = vec![0f32; buckets];
+        let mut i = 0usize;
+        av::stream_audio(path, |chunk| {
+            for &x in chunk {
+                let b = ((i as f64 / per) as usize).min(buckets - 1);
+                peaks[b] = peaks[b].max(x.abs());
+                i += 1;
+            }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+        Ok(peaks)
+    })
+    .await
+    .map_err(|e| format!("waveform task panicked: {e}"))?
 }
 
 /// Parsed grid (header row + data rows, all cells verbatim) of a CSV document,
@@ -973,44 +1196,139 @@ fn merge_char_boxes(boxes: &[pdf::CharBox]) -> Vec<[f32; 4]> {
     rects
 }
 
-/// Build a unit-norm weighted-centroid query vector from semantic terms +
-/// preferences (all embedded with the query prefix). Returns `None` when there
-/// is nothing to embed.
+/// Build a unit-norm weighted-centroid query vector from weighted text terms
+/// (embedded with the query prefix) plus already-embedded weighted vectors
+/// (relevance-feedback marks). Returns `None` when there is nothing to use.
 async fn build_centroid(
-    model: SharedModel,
-    inputs: Vec<(String, f32)>,
+    embedder: &EmbedService,
+    texts: Vec<(String, f32)>,
+    vectors: Vec<(Vec<f32>, f32)>,
 ) -> Result<Option<Vec<f32>>, String> {
-    if inputs.is_empty() {
+    if texts.is_empty() && vectors.is_empty() {
         return Ok(None);
     }
-    tauri::async_runtime::spawn_blocking(move || -> Result<Option<Vec<f32>>, String> {
-        let ctx = model.lock().map_err(|_| "model mutex poisoned".to_string())?;
-        let texts: Vec<String> = inputs
-            .iter()
-            .map(|(t, _)| format!("{QUERY_PREFIX}{t}"))
-            .collect();
-        let emb = embed_sentences(&ctx, &texts).map_err(|e| e.to_string())?;
-        let dim = emb.rows.first().map(|r| r.len()).unwrap_or(0);
-        if dim == 0 {
-            return Ok(None);
+    let prompts: Vec<String> = texts.iter().map(|(t, _)| format!("{QUERY_PREFIX}{t}")).collect();
+    let emb = embedder
+        .run(Lane::Priority, move |m| m.embed_texts(&prompts))
+        .await
+        .map_err(|e| e.to_string())?;
+    let weighted: Vec<(f32, &[f32])> = texts
+        .iter()
+        .zip(emb.rows.iter())
+        .map(|((_, w), row)| (*w, row.as_slice()))
+        .chain(vectors.iter().map(|(v, w)| (*w, v.as_slice())))
+        .collect();
+    let dim = weighted.first().map(|(_, r)| r.len()).unwrap_or(0);
+    if dim == 0 {
+        return Ok(None);
+    }
+    let mut centroid = vec![0.0f32; dim];
+    for (w, row) in weighted {
+        for (c, x) in centroid.iter_mut().zip(row.iter()) {
+            *c += w * x;
         }
-        let mut centroid = vec![0.0f32; dim];
-        for ((_, w), row) in inputs.iter().zip(emb.rows.iter()) {
-            for (c, x) in centroid.iter_mut().zip(row.iter()) {
-                *c += w * x;
+    }
+    let norm = centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm < 1e-8 {
+        return Ok(None); // weights cancelled out
+    }
+    for c in &mut centroid {
+        *c /= norm;
+    }
+    Ok(Some(centroid))
+}
+
+/// A file attached to a search query: an image or audio file by path, or an
+/// in-app voice recording as base64 bytes (with its container extension).
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryAttachment {
+    /// "image" or "audio".
+    kind: String,
+    path: Option<String>,
+    data_base64: Option<String>,
+    ext: Option<String>,
+}
+
+/// Decode a query's attachments (off the async runtime) and embed them with
+/// the text as one interleaved query vector.
+async fn embed_mixed_query(
+    embedder: &EmbedService,
+    text: String,
+    attachments: Vec<QueryAttachment>,
+) -> Result<Vec<f32>, String> {
+    use base64::Engine;
+    use semantra_embed::media::{av, image};
+    let (images, clips) = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+        let mut images = Vec::new();
+        let mut clips: Vec<Vec<f32>> = Vec::new();
+        for a in attachments {
+            // A recording arrives as bytes; AVFoundation decodes from a file.
+            let tmp = match &a.data_base64 {
+                Some(b64) => {
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .map_err(|e| format!("bad attachment data: {e}"))?;
+                    let ext = a.ext.as_deref().unwrap_or("m4a").trim_start_matches('.');
+                    let mut f = tempfile::Builder::new()
+                        .suffix(&format!(".{ext}"))
+                        .tempfile()
+                        .map_err(|e| format!("temp file: {e}"))?;
+                    std::io::Write::write_all(&mut f, &bytes).map_err(|e| format!("temp file: {e}"))?;
+                    Some(f)
+                }
+                None => None,
+            };
+            let path = match (&tmp, &a.path) {
+                (Some(f), _) => f.path().to_path_buf(),
+                (None, Some(p)) => PathBuf::from(p),
+                (None, None) => return Err("attachment has no path or data".into()),
+            };
+            match a.kind.as_str() {
+                "image" => {
+                    let rgb = image::decode(&path).map_err(|e| e.to_string())?;
+                    images.push(image::prepare(&rgb, image::IMAGE_SOFT_TOKENS).map_err(|e| e.to_string())?);
+                }
+                "audio" => {
+                    let mut pcm = Vec::new();
+                    av::stream_audio(&path, |c| {
+                        if pcm.len() < semantra_embed::media::mel::MAX_SAMPLES {
+                            pcm.extend_from_slice(c);
+                        }
+                        Ok(())
+                    })
+                    .map_err(|e| e.to_string())?;
+                    clips.push(pcm);
+                }
+                other => return Err(format!("unsupported attachment kind {other:?}")),
             }
         }
-        let norm = centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
-        if norm < 1e-8 {
-            return Ok(None); // weights cancelled out
-        }
-        for c in &mut centroid {
-            *c /= norm;
-        }
-        Ok(Some(centroid))
+        Ok((images, clips))
     })
     .await
-    .map_err(|e| format!("centroid task panicked: {e}"))?
+    .map_err(|e| format!("attachment task panicked: {e}"))??;
+    embedder
+        .run(Lane::Priority, move |m| {
+            let refs: Vec<&[f32]> = clips.iter().map(|c| c.as_slice()).collect();
+            m.embed_query_mixed(&text, &images, &refs)
+        })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// A JPEG `data:` URL preview of an arbitrary local image (e.g. one attached
+/// to a query, which lives outside the app-data asset scope).
+#[tauri::command]
+async fn thumbnail_for_path(path: String, max_side: u32) -> Result<String, String> {
+    use base64::Engine;
+    use semantra_embed::media::image;
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let rgb = image::decode_max(std::path::Path::new(&path), max_side.clamp(32, 1024)).map_err(|e| e.to_string())?;
+        let jpeg = image::encode_jpeg(&rgb, 0.8).map_err(|e| e.to_string())?;
+        Ok(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(jpeg)))
+    })
+    .await
+    .map_err(|e| format!("thumbnail task panicked: {e}"))?
 }
 
 /// The in-project search: parse the query into weighted semantic terms + quoted
@@ -1018,7 +1336,7 @@ async fn build_centroid(
 /// hits restricted to the project's files.
 #[tauri::command]
 async fn search_project(
-    model: State<'_, SharedModel>,
+    embedder: State<'_, EmbedService>,
     store: State<'_, SharedStore>,
     catalog: State<'_, SharedCatalog>,
     project_id: String,
@@ -1026,8 +1344,13 @@ async fn search_project(
     preferences: Vec<query::Preference>,
     limit: usize,
     mode: String,
+    modalities: Option<Vec<String>>,
+    attachments: Option<Vec<QueryAttachment>>,
 ) -> Result<Vec<ProjectHit>, String> {
+    let attachments = attachments.unwrap_or_default();
     let mode = SearchMode::parse(&mode)?;
+    // Result-type filter (empty/absent = every modality).
+    let modalities: Vec<Modality> = modalities.unwrap_or_default().iter().map(|m| Modality::parse(m)).collect();
     let files = catalog.lock().await.list_project_files(&project_id).await?;
     if files.is_empty() {
         return Ok(Vec::new());
@@ -1041,14 +1364,39 @@ async fn search_project(
     // Parse + normalize weights (semantic terms and preferences share the split).
     let parsed = query::parse_query(&query);
     let mut semantic = parsed.semantic;
+    // With attached media, the positive text terms and the media embed together
+    // as ONE interleaved query (the model composes them natively, e.g. a photo
+    // + "but at night"); it takes a single positive slot in the weighting,
+    // alongside any negative terms and feedback marks.
+    let mut mixed_text: Option<String> = None;
+    if !attachments.is_empty() {
+        let positive: Vec<String> = semantic.iter().filter(|t| t.weight > 0.0).map(|t| t.text.clone()).collect();
+        mixed_text = Some(positive.join(" "));
+        semantic.retain(|t| t.weight < 0.0);
+        semantic.insert(0, query::WeightedTerm { text: String::new(), weight: 1.0 });
+    }
     let mut prefs = preferences;
     query::normalize_weights(&mut semantic, &mut prefs);
     let literals = parsed.literals;
 
-    // Weighted-centroid embedding input = semantic terms + preference texts.
-    let mut inputs: Vec<(String, f32)> = semantic.iter().map(|t| (t.text.clone(), t.weight)).collect();
-    inputs.extend(prefs.iter().map(|p| (p.text.clone(), p.weight)));
-    let centroid = build_centroid(Arc::clone(model.inner()), inputs).await?;
+    // Weighted-centroid input = semantic terms + preferences. A preference on a
+    // stored chunk uses that chunk's vector; one without (legacy) its text.
+    let ids: Vec<i64> = prefs.iter().filter_map(|p| p.id).collect();
+    let stored = store.lock().await.vectors_by_id(&ids).await?;
+    let mut vectors: Vec<(Vec<f32>, f32)> = Vec::new();
+    if let Some(text) = mixed_text {
+        let weight = semantic.remove(0).weight;
+        vectors.push((embed_mixed_query(embedder.inner(), text, attachments).await?, weight));
+    }
+    let mut texts: Vec<(String, f32)> = semantic.iter().map(|t| (t.text.clone(), t.weight)).collect();
+    for p in &prefs {
+        match p.id.and_then(|id| stored.get(&id)) {
+            Some(v) => vectors.push((v.clone(), p.weight)),
+            None if !p.text.is_empty() => texts.push((p.text.clone(), p.weight)),
+            None => {}
+        }
+    }
+    let centroid = build_centroid(embedder.inner(), texts, vectors).await?;
 
     // Candidate set from quoted literals: chunks where each literal matches as a
     // word *prefix* (so `"green"` matches "greenhouse"). The store's substring
@@ -1092,7 +1440,7 @@ async fn search_project(
         // Semantic (optionally keyword-filtered).
         (Some(vec), cand) => {
             let fetch = if cand.is_some() { (limit * 20).max(200) } else { limit };
-            let mut hits = store.lock().await.search(vec, fetch, mode, &shas).await?;
+            let mut hits = store.lock().await.search(vec, fetch, mode, &shas, &modalities).await?;
             if let Some(cand) = cand {
                 hits.retain(|h| cand.contains(&h.id));
             }
@@ -1106,6 +1454,7 @@ async fn search_project(
             let mut out: Vec<store::Hit> = cand
                 .iter()
                 .filter_map(|id| candidate_hits.get(id).cloned())
+                .filter(|h| modalities.is_empty() || modalities.contains(&h.modality))
                 .collect();
             out.sort_by(|a, b| b.score.total_cmp(&a.score));
             out.truncate(limit);
@@ -1127,6 +1476,7 @@ async fn search_project(
                 sha512: h.sha512,
                 basename,
                 filetype,
+                modality: h.modality,
                 text: h.text,
                 distance: h.distance,
                 score: h.score,
@@ -1134,6 +1484,8 @@ async fn search_project(
                 char_end: h.char_end,
                 page: h.page,
                 page_char_start: h.page_char_start,
+                time_start_ms: h.time_start_ms,
+                time_end_ms: h.time_end_ms,
             }
         })
         .collect())
@@ -1145,11 +1497,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Load the model on its inference thread (which then warms up the
+            // Metal kernels in the background before taking any work).
             let model_dir = resolve_model_dir(app)?;
-            let ctx = setup_model(&model_dir).map_err(|e| e.to_string())?;
-            let embedding_dim = ctx.embedding_dim() as i32;
-            let shared: SharedModel = Arc::new(Mutex::new(ctx));
-            app.manage(Arc::clone(&shared));
+            let embedder = EmbedService::spawn(model_dir, EMBED_DIM).map_err(|e| e.to_string())?;
+            let embedding_dim = embedder.embedding_dim() as i32;
+            app.manage(embedder);
 
             // Bind the bundled PDFium library once and share the single instance.
             let pdfium_dir = resolve_pdfium_dir(app)?;
@@ -1190,6 +1543,10 @@ pub fn run() {
                 let stored = catalog.get_meta(DB_MODEL_KEY).await?;
                 if stored.as_deref() != Some(active.as_str()) {
                     let n = catalog.requeue_all_for_reindex(now_ms()).await?;
+                    let retried = catalog.retry_failed_jobs().await?;
+                    if retried > 0 {
+                        eprintln!("[semantra] retrying {retried} previously failed file(s)");
+                    }
                     store::drop_chunks(&conn).await?;
                     catalog.set_meta(DB_MODEL_KEY, &active).await?;
                     if stored.is_some() {
@@ -1218,16 +1575,6 @@ pub fn run() {
             let worker_app = app.handle().clone();
             tauri::async_runtime::spawn(async move { index_worker(worker_app).await });
             notify.notify_one();
-
-            // Warm up embedding kernels in the background (Metal pipeline compile).
-            std::thread::spawn(move || match shared.lock() {
-                Ok(ctx) => {
-                    if let Err(e) = warmup(&ctx) {
-                        eprintln!("[semantra] model warmup failed: {e}");
-                    }
-                }
-                Err(_) => eprintln!("[semantra] model mutex poisoned before warmup"),
-            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1237,12 +1584,16 @@ pub fn run() {
             delete_project,
             add_files_to_project,
             delete_file_from_project,
+            retry_file,
             project_status,
             explain_matches,
             list_documents,
             get_document_text,
             get_pdf_src,
             get_csv_data,
+            get_thumbnail,
+            thumbnail_for_path,
+            get_waveform,
             get_highlight_rects,
             search_project
         ])

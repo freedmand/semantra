@@ -53,19 +53,38 @@
   /** Scroll to and highlight a chunk's span on `page` (0-based). Safe to call
    *  before the document finishes loading — it is re-applied on pagesinit. */
   export async function navigate(page: number, pageCharStart: number, length: number) {
+    // Go to the page first, unconditionally: a missing/failed highlight must
+    // never swallow the jump. Visual (page-render) hits have no span at all.
+    // Erase old paint when leaving its page — or always for a visual hit,
+    // which has no passage (a stale highlight would misattribute the match).
+    if (painted && (painted.page !== page || length <= 0)) restoreClean();
+    active = { page, hl: { pageWidth: 0, pageHeight: 0, rects: [] } };
+    needScroll = true;
+    if (pdfViewer && pdf.totalPages > 0) pdfViewer.currentPageNumber = page + 1;
+    if (length <= 0) {
+      // A visual (whole-page) match: briefly outline the page instead.
+      pulsePage(page);
+      return;
+    }
     try {
       const hl = await getHighlightRects(sha512, page, pageCharStart, length);
-      // Erase any paint left on a page we're navigating away from.
-      if (painted && painted.page !== page) restoreClean();
+      // Ignore a stale response if the user navigated elsewhere meanwhile.
+      if (!active || active.page !== page) return;
       active = { page, hl };
-      needScroll = true;
-      if (pdfViewer && pdf.totalPages > 0) {
-        pdfViewer.currentPageNumber = page + 1;
-        drawOverlay(); // immediate if rendered; `pagerendered` covers the rest
-      }
+      if (pdfViewer && pdf.totalPages > 0) drawOverlay(); // else `pagerendered`
     } catch (e) {
       console.warn("highlight failed", e);
     }
+  }
+
+  /** Briefly outline a page (feedback for whole-page visual matches). */
+  function pulsePage(page: number) {
+    const div = pdfViewer?.getPageView(page)?.div as HTMLElement | undefined;
+    if (!div) return;
+    div.classList.remove("semantra-page-pulse");
+    void div.offsetWidth; // restart the animation
+    div.classList.add("semantra-page-pulse");
+    setTimeout(() => div.classList.remove("semantra-page-pulse"), 1400);
   }
 
   /** The rendered <canvas> for the active page, if it exists yet. */
@@ -327,6 +346,17 @@
 </div>
 
 <style>
+  :global(.semantra-page-pulse) {
+    animation: semantra-page-pulse 1.4s ease-out;
+  }
+  @keyframes -global-semantra-page-pulse {
+    0% {
+      box-shadow: 0 0 0 6px var(--color-page-highlight);
+    }
+    100% {
+      box-shadow: 0 0 0 6px transparent;
+    }
+  }
   .pdf-app {
     display: flex;
     flex-direction: column;
