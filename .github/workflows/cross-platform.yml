@@ -15,6 +15,12 @@ on:
       - "exp/**"
   workflow_dispatch:
 
+# A newer push supersedes an in-flight run (each run includes a long Intel Mac
+# ONNX Runtime source build until its cache is warm).
+concurrency:
+  group: cross-platform-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     strategy:
