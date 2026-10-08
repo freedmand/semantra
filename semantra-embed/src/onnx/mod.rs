@@ -31,7 +31,7 @@ use tokenizers::Tokenizer;
 
 use crate::config::ModelConfig;
 use crate::media::{self, image::Prepared};
-use crate::{Embeddings, Explanation, MAX_INPUT_TOKENS, QUERY_PREFIX};
+use crate::{Embeddings, Explanation, FULL_DIM, MAX_INPUT_TOKENS, QUERY_PREFIX};
 
 /// Soft-token feature width shared by the vision and audio encoders.
 const SOFT_DIM: usize = 512;
@@ -216,8 +216,7 @@ impl Model {
             return Ok(Embeddings { rows: vec![], dim: self.dim });
         }
         let (ids, mask) = self.tokenize(inputs)?;
-        let per_token = self.run_text(ids, mask.clone(), Soft::default())?;
-        self.pooled(&per_token, &mask)
+        self.embed_ids(ids, mask, Soft::default())
     }
 
     /// Embed images or video windows (no text prompt). `grid` holds
@@ -239,8 +238,7 @@ impl Model {
         let c = &self.config;
         let row = delimited(&[(c.boa_token_id, c.audio_token_id, c.eoa_token_index, n)]);
         let (ids, mask) = repeat_rows(&row, clips.len());
-        let per_token = self.run_text(ids, mask.clone(), Soft { image: None, audio: Some(soft) })?;
-        self.pooled(&per_token, &mask)
+        self.embed_ids(ids, mask, Soft { image: None, audio: Some(soft) })
     }
 
     /// Run only the vision encoder over `grid` (one video frame per image) and
@@ -302,8 +300,7 @@ impl Model {
         };
         let soft = Soft { image: concat(&image_parts)?, audio: concat(&audio_parts)? };
         let (ids, mask) = repeat_rows(&ids, 1);
-        let per_token = self.run_text(ids, mask.clone(), soft)?;
-        Ok(self.pooled(&per_token, &mask)?.rows.into_iter().next().unwrap_or_default())
+        Ok(self.embed_ids(ids, mask, soft)?.rows.into_iter().next().unwrap_or_default())
     }
 
     /// Attribute the cosine similarity between `query_vec` and each document to
@@ -351,19 +348,43 @@ impl Model {
         Ok((Array2::from_shape_vec((b, l), ids)?, Array2::from_shape_vec((b, l), mask)?))
     }
 
+    /// Pooled, normalized embeddings for already-built sequences. At full width
+    /// the graph's own `sentence_embedding` (masked mean -> L2, identical to
+    /// [`pooled`](Self::pooled)) is fetched alone, so the (B, L, 768) per-token
+    /// tensor never leaves the GPU; Matryoshka widths pool the truncated
+    /// per-token states here.
+    fn embed_ids(&self, ids: Array2<i64>, mask: Array2<i64>, soft: Soft) -> Result<Embeddings> {
+        if self.dim != FULL_DIM {
+            let per_token = self.run_text(ids, mask.clone(), soft)?;
+            return self.pooled(&per_token, &mask);
+        }
+        let e = self.text_output(ids, mask, soft, "sentence_embedding")?.into_dimensionality::<Ix2>()?;
+        Ok(Embeddings { rows: e.rows().into_iter().map(|r| r.to_vec()).collect(), dim: self.dim })
+    }
+
     /// The text encoder -> per-token (B, L, 768) states.
     fn run_text(&self, ids: Array2<i64>, mask: Array2<i64>, soft: Soft) -> Result<Array3<f32>> {
+        Ok(self.text_output(ids, mask, soft, "last_hidden_state")?.into_dimensionality::<Ix3>()?)
+    }
+
+    /// Run the text encoder, fetching only the output named `output`.
+    fn text_output(&self, ids: Array2<i64>, mask: Array2<i64>, soft: Soft, output: &str) -> Result<ndarray::ArrayD<f32>> {
         let empty = || Array2::<f32>::zeros((0, SOFT_DIM));
+        let options = ort::session::RunOptions::new()?
+            .with_outputs(ort::session::OutputSelector::no_default().with(output));
         let _run = run_lock();
         let mut text = self.text.lock().map_err(|_| anyhow!("text session poisoned"))?;
-        let out = text.run(ort::inputs![
-            "input_ids" => Tensor::from_array(ids)?,
-            "attention_mask" => Tensor::from_array(mask)?,
-            "image_features" => Tensor::from_array(soft.image.unwrap_or_else(empty))?,
-            "video_features" => Tensor::from_array(empty())?,
-            "audio_features" => Tensor::from_array(soft.audio.unwrap_or_else(empty))?,
-        ])?;
-        Ok(out["last_hidden_state"].try_extract_array::<f32>()?.into_dimensionality::<Ix3>()?.to_owned())
+        let out = text.run_with_options(
+            ort::inputs![
+                "input_ids" => Tensor::from_array(ids)?,
+                "attention_mask" => Tensor::from_array(mask)?,
+                "image_features" => Tensor::from_array(soft.image.unwrap_or_else(empty))?,
+                "video_features" => Tensor::from_array(empty())?,
+                "audio_features" => Tensor::from_array(soft.audio.unwrap_or_else(empty))?,
+            ],
+            &options,
+        )?;
+        Ok(out[output].try_extract_array::<f32>()?.to_owned())
     }
 
     /// Masked mean -> truncate to `dim` -> L2 normalize, per row.
@@ -424,8 +445,7 @@ impl Model {
         let c = &self.config;
         let row = delimited(&vec![(c.boi_token_id, c.image_token_id, c.eoi_token_id, n); per_item]);
         let (ids, mask) = repeat_rows(&row, frames / per_item);
-        let per_token = self.run_text(ids, mask.clone(), Soft { image: Some(soft), audio: None })?;
-        self.pooled(&per_token, &mask)
+        self.embed_ids(ids, mask, Soft { image: Some(soft), audio: None })
     }
 }
 
