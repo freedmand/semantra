@@ -16,18 +16,9 @@ open-source EmbeddingGemma2 model, which runs entirely locally on your machine.
 | Windows 10/11 (64-bit) | [**Semantra-Windows-x64-setup.exe**](https://github.com/freedmand/semantra/releases/latest/download/Semantra-Windows-x64-setup.exe) |
 | Linux (64-bit) | [**Semantra-Linux-x86_64.AppImage**](https://github.com/freedmand/semantra/releases/latest/download/Semantra-Linux-x86_64.AppImage) · [**.deb**](https://github.com/freedmand/semantra/releases/latest/download/Semantra-Linux-amd64.deb) |
 
-------------
-
-A.I.-written text follows:
-
-Each download is about 1 GB, because the model is bundled so everything works offline. Not sure
-which Mac you have? Apple menu → **About This Mac**: "Chip: Apple M…" means Apple Silicon. Once
-installed, Semantra updates itself. Release notes and older versions are on the
-[releases page](https://github.com/freedmand/semantra/releases).
-
-NOTE: For the legacy Python codebase, see: http://github.com/freedmand/semantra-python.
-
 ## Development
+
+(Note: The text that follows is A.I.-generated)
 
 Semantra 0.3.0 runs on Apple Silicon (MLX) and on Windows, Linux and Intel Macs (ONNX Runtime; see below).
 Embeddings come from [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2), which produces
