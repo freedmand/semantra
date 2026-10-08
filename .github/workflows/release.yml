@@ -200,6 +200,12 @@ jobs:
         if: matrix.backend == 'onnx'
         run: bash src-tauri/scripts/fetch-onnxruntime.sh ${{ matrix.ort }}
 
+      # Windows/Linux: the ffmpeg sidecar (bundle.externalBin) the portable
+      # media decoders use for video, HEIC and extra audio codecs.
+      - name: Fetch ffmpeg sidecar
+        if: matrix.backend == 'onnx' && runner.os != 'macOS'
+        run: bash src-tauri/scripts/fetch-ffmpeg.sh ${{ matrix.ort }}
+
       - name: Save ONNX Runtime source build (Intel Mac)
         if: matrix.ort == 'macos-x64' && steps.ort-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
