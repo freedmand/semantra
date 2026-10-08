@@ -12,6 +12,8 @@ edition = "2021"
 # Metal toolchain: `xcodebuild -downloadComponent MetalToolchain`).
 
 [dependencies]
+# CPU FFT for the MLX-free log-mel front end (`media::mel::log_mel_cpu`).
+realfft = "3"
 mlx-rs = "0.32"
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 anyhow = "1"
@@ -38,5 +40,8 @@ objc2-av-foundation = { version = "0.3", features = ["objc2-core-media", "objc2-
 objc2-core-media = "0.3"
 
 [dev-dependencies]
+# ONNX Runtime backend experiment (examples/onnx_parity.rs).
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "webgpu", "api-27"] }
+ndarray = "0.17"
 # Reads the 16-bit PCM WAV fixtures in the golden parity tests.
 hound = "3"

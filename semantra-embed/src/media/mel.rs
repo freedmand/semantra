@@ -65,6 +65,48 @@ pub fn log_mel(clips: &[&[f32]]) -> Result<(Array, Array)> {
     Ok((logmel, mask))
 }
 
+/// [`log_mel`] on the CPU for one 16 kHz mono clip, for backends without
+/// MLX: (frames × 128) row-major features with padded frames zeroed, the
+/// frame count, and how many frames are real.
+pub fn log_mel_cpu(clip: &[f32]) -> Result<(Vec<f32>, usize, usize)> {
+    let n = clip.len();
+    if n == 0 || n > MAX_SAMPLES {
+        bail!("clip must be non-empty and <= {MAX_SAMPLES} samples");
+    }
+    let (frames, valid) = frame_counts(n);
+    let padded_len = n.div_ceil(PAD_MULTIPLE) * PAD_MULTIPLE + FRAME / 2;
+    let mut wave = vec![0f32; padded_len];
+    wave[FRAME / 2..FRAME / 2 + n].copy_from_slice(clip);
+    let window: Vec<f32> = (0..FRAME)
+        .map(|k| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * k as f32 / FRAME as f32).cos())
+        .collect();
+    let filters = mel_filters();
+    let bins = (FFT / 2 + 1) as usize;
+    let fft = realfft::RealFftPlanner::<f32>::new().plan_fft_forward(FFT as usize);
+    let (mut input, mut spectrum) = (fft.make_input_vec(), fft.make_output_vec());
+    let mut mag = vec![0f32; bins];
+    let mut out = vec![0f32; frames * MELS];
+    for f in 0..valid {
+        input.iter_mut().for_each(|x| *x = 0.0);
+        for k in 0..FRAME {
+            input[k] = wave[f * HOP + k] * window[k];
+        }
+        fft.process(&mut input, &mut spectrum).map_err(|e| anyhow::anyhow!("rfft: {e}"))?;
+        for (m, c) in mag.iter_mut().zip(&spectrum) {
+            *m = c.norm();
+        }
+        let row = &mut out[f * MELS..(f + 1) * MELS];
+        for (k, &m) in mag.iter().enumerate() {
+            let fk = &filters[k * MELS..(k + 1) * MELS];
+            for (r, &w) in row.iter_mut().zip(fk) {
+                *r += m * w;
+            }
+        }
+        row.iter_mut().for_each(|r| *r = (*r + MEL_FLOOR).ln());
+    }
+    Ok((out, frames, valid))
+}
+
 /// (257, 128) triangular HTK mel filterbank over 0–8 kHz, no normalization.
 fn mel_filters() -> Vec<f32> {
     let bins = (FFT / 2 + 1) as usize;
@@ -90,6 +132,21 @@ fn mel_filters() -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_log_mel_matches_mlx() {
+        let clip: Vec<f32> = (0..40_000).map(|i| ((i as f32) * 0.031).sin() * 0.3 + ((i as f32) * 0.0047).cos() * 0.2).collect();
+        let (cpu, frames, valid) = log_mel_cpu(&clip).unwrap();
+        let (gpu, mask) = log_mel(&[&clip]).unwrap();
+        assert_eq!(gpu.shape(), &[1, frames as i32, MELS as i32]);
+        assert_eq!(mask.as_dtype(Dtype::Int32).unwrap().sum(None).unwrap().item::<i32>() as usize, valid);
+        let gpu: Vec<f32> = gpu.as_slice::<f32>().to_vec();
+        // Both are F32 FFTs; log(x + 1e-3) amplifies rounding near the floor.
+        let diffs: Vec<f32> = cpu.iter().zip(&gpu).map(|(a, b)| (a - b).abs()).collect();
+        let worst = diffs.iter().cloned().fold(0f32, f32::max);
+        let mean = diffs.iter().sum::<f32>() / diffs.len() as f32;
+        assert!(worst < 1e-2 && mean < 1e-3, "|cpu - mlx|: max {worst}, mean {mean}");
+    }
 
     #[test]
     fn frame_counts_match_reference() {

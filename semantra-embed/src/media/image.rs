@@ -218,6 +218,26 @@ pub fn stack(images: &[&Prepared]) -> Result<PatchGrid> {
     })
 }
 
+/// One prepared image as the vision tower's input on the CPU, for backends
+/// without MLX: (rows·cols × 768) patches in [0, 1] — row-major, each patch
+/// flattened row, col, channel — and each patch's (x, y) grid position.
+pub fn patchify(p: &Prepared) -> (Vec<f32>, Vec<i64>) {
+    let (rows, cols, patch) = (p.rows as usize, p.cols as usize, PATCH as usize);
+    let width = cols * patch;
+    let mut pixels = Vec::with_capacity(rows * cols * patch * patch * 3);
+    let mut positions = Vec::with_capacity(rows * cols * 2);
+    for r in 0..rows {
+        for c in 0..cols {
+            for y in 0..patch {
+                let start = ((r * patch + y) * width + c * patch) * 3;
+                pixels.extend(p.pixels[start..start + patch * 3].iter().map(|&v| v as f32 / 255.0));
+            }
+            positions.extend([c as i64, r as i64]);
+        }
+    }
+    (pixels, positions)
+}
+
 impl Prepared {
     /// `(rows, cols)` patch grid — the batching key.
     pub fn grid(&self) -> (u32, u32) {
