@@ -26,10 +26,12 @@ token="$(curl -fsS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" 
   | python -c "import json, sys; print(json.load(sys.stdin)['value'])")"
 az login --service-principal --username "${AZURE_CLIENT_ID}" --tenant "${AZURE_TENANT_ID}" \
   --federated-token "${token}" --allow-no-subscriptions --output none
+echo "sign-windows: signing ${file} as $(az account show --query user.name -o tsv 2>/dev/null)" >&2
 
 # MSYS_NO_PATHCONV: Git Bash would otherwise rewrite signtool's /flags into
 # paths. The dlib/metadata/file paths are already native Windows paths.
 MSYS_NO_PATHCONV=1 "${SIGNTOOL}" sign /v /fd SHA256 /tr "http://timestamp.acs.microsoft.com" /td SHA256 \
-  /dlib "${SIGNING_DLIB}" /dmdf "${SIGNING_METADATA}" "${file}"
-MSYS_NO_PATHCONV=1 "${SIGNTOOL}" verify /pa "${file}" >/dev/null
+  /dlib "${SIGNING_DLIB}" /dmdf "${SIGNING_METADATA}" "${file}" 1>&2
+# Tauri shows only stderr from signCommand, so keep signtool's output there.
+MSYS_NO_PATHCONV=1 "${SIGNTOOL}" verify /pa /v "${file}" 1>&2
 echo "signed: ${file}"
