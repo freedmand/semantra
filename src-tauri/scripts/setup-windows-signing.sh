@@ -33,7 +33,15 @@ PY
   echo "SIGNING_DLIB=$(cygpath -w "$dlib")"
   echo "SIGNING_METADATA=$(cygpath -w "$tools/metadata.json")"
 } >> "$GITHUB_ENV"
-script="$(cygpath -m "$ROOT")/scripts/sign-windows.sh"
-printf '{"bundle":{"windows":{"signCommand":"bash %s %%1"}}}\n' "$script" > "$ROOT/tauri.windows-sign.conf.json"
+# Absolute Git Bash: Tauri spawns signCommand as a plain Windows process, and
+# a bare `bash` there resolves to the WSL launcher (C:\Windows\System32),
+# which fails on runners without a distro. The cmd/args form keeps the
+# spaces in "Program Files" intact.
+python - "$(cygpath -w "$(command -v bash)")" "$(cygpath -m "$ROOT")/scripts/sign-windows.sh" \
+  "$ROOT/tauri.windows-sign.conf.json" <<'PY'
+import json, sys
+bash, script, out = sys.argv[1:]
+json.dump({"bundle": {"windows": {"signCommand": {"cmd": bash, "args": [script, "%1"]}}}}, open(out, "w"))
+PY
 cat "$ROOT/tauri.windows-sign.conf.json"
 "$signtool" /? 2>&1 | head -2 || true

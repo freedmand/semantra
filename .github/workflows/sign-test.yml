@@ -51,8 +51,7 @@ jobs:
         working-directory: src-tauri
         run: |
           bash scripts/fetch-ffmpeg.sh windows-x64
-          cmd="$(python -c "import json; print(json.load(open('tauri.windows-sign.conf.json'))['bundle']['windows']['signCommand'])")"
-          echo "signCommand: $cmd"
-          script="${cmd#bash }"; script="${script% %1}"
-          bash "$script" 'binaries\ffmpeg-x86_64-pc-windows-msvc.exe'
+          # Spawn it the way Tauri does: a plain Windows process (not from Git
+          # Bash), with the configured cmd and args.
+          pwsh -NoProfile -Command '$c = (Get-Content tauri.windows-sign.conf.json | ConvertFrom-Json).bundle.windows.signCommand; Write-Host "signCommand: $($c.cmd) $($c.args -join " ")"; $a = $c.args | ForEach-Object { $_ -replace "%1", "binaries\ffmpeg-x86_64-pc-windows-msvc.exe" }; & $c.cmd @a; exit $LASTEXITCODE'
 
