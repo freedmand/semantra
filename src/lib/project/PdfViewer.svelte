@@ -131,6 +131,7 @@
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     let topT = -Infinity; // largest PDF top = visually highest point of the span
+    let botB = Infinity; // smallest PDF bottom = visually lowest point
     const boxes = active.hl.rects.map(([l, b, r, t]) => {
       const x = (l / pw) * DW;
       const y = ((ph - t) / ph) * DH; // flip y: PDF up → screen down
@@ -139,6 +140,7 @@
       minX = Math.min(minX, x); minY = Math.min(minY, y);
       maxX = Math.max(maxX, x + w); maxY = Math.max(maxY, y + h);
       if (t > topT) topT = t;
+      if (b < botB) botB = b;
       return { x, y, w, h };
     });
 
@@ -168,17 +170,24 @@
     painted = { page: active.page, canvas, clean, x: sx, y: sy };
 
     if (needScroll && topT > -Infinity) {
-      scrollToTop(canvas, ph, topT);
+      scrollToHighlight(canvas, ph, topT, botB);
       needScroll = false;
     }
   }
 
-  /** Scroll the viewport so the top of the highlight sits near the top. */
-  function scrollToTop(canvas: HTMLCanvasElement, ph: number, topT: number) {
+  /** Scroll the viewport so the highlight is vertically centered — or, if it's
+   *  taller than the viewport, so its top sits near the top. Pinning the top
+   *  instead would leave a hit near a page's bottom edge mostly showing (and
+   *  the page counter reporting) the next page. */
+  function scrollToHighlight(canvas: HTMLCanvasElement, ph: number, topT: number, botB: number) {
     const topCss = ((ph - topT) / ph) * canvas.clientHeight; // CSS px within the page
+    const botCss = ((ph - botB) / ph) * canvas.clientHeight;
+    const viewH = viewerContainer.clientHeight;
+    const margin = 24; // breathing room
+    const offset = botCss - topCss + 2 * margin > viewH ? margin : (viewH - (botCss - topCss)) / 2;
     const containerTop = viewerContainer.getBoundingClientRect().top;
     const canvasTop = canvas.getBoundingClientRect().top;
-    viewerContainer.scrollTop += canvasTop - containerTop + topCss - 24; // 24px breathing room
+    viewerContainer.scrollTop += canvasTop - containerTop + topCss - offset;
   }
 
   async function loadDocument() {

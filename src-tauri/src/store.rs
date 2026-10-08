@@ -632,6 +632,49 @@ impl VectorStore {
         Ok(())
     }
 
+    /// Delete every chunk matching a raw filter `predicate` (e.g. one file's
+    /// text rows from a given pipeline version).
+    pub async fn delete_where(&mut self, predicate: &str) -> Result<(), String> {
+        if let Some(table) = &self.table {
+            table
+                .delete(predicate)
+                .await
+                .map_err(|e| format!("delete chunks: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// The distinct `pipeline_version`s among a file's text rows (empty when it
+    /// has none) — lets a text-only re-index tell done files from stale ones.
+    pub async fn text_versions(&self, sha512: &str) -> Result<Vec<String>, String> {
+        let Some(table) = &self.table else {
+            return Ok(Vec::new());
+        };
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .only_if(format!("sha512 = '{sha512}' AND modality = 'text'"))
+            .select(lancedb::query::Select::columns(&["pipeline_version"]))
+            .execute()
+            .await
+            .map_err(|e| format!("query text versions: {e}"))?
+            .try_collect()
+            .await
+            .map_err(|e| format!("collect text versions: {e}"))?;
+        let mut out: Vec<String> = Vec::new();
+        for b in &batches {
+            let Some(col) = b.column_by_name("pipeline_version").and_then(|c| c.as_any().downcast_ref::<StringArray>()) else {
+                continue;
+            };
+            for i in 0..b.num_rows() {
+                let v = col.value(i);
+                if !out.iter().any(|o| o == v) {
+                    out.push(v.to_string());
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Number of chunks belonging to the given files.
     pub async fn count_for(&self, sha_filter: &[String]) -> Result<usize, String> {
         let Some(table) = &self.table else {
@@ -988,5 +1031,25 @@ mod tests {
         store.delete_file("a").await.unwrap();
         assert_eq!(store.count_for(&["a".into()]).await.unwrap(), 0);
         assert_eq!(store.count_for(&["b".into()]).await.unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn text_only_swap_keeps_media_rows() {
+        let (mut store, _t) = temp_store(2).await;
+        let image = ChunkRow { modality: Modality::Image, text: String::new(), ..row("f", "", vec![0.0, 1.0]) };
+        let new_text = ChunkRow { pipeline_version: "v2".into(), ..row("f", "new", vec![1.0, 0.0]) };
+        store.insert(&[row("f", "old", vec![1.0, 0.0]), image, new_text]).await.unwrap();
+        let mut versions = store.text_versions("f").await.unwrap();
+        versions.sort();
+        assert_eq!(versions, vec!["v1".to_string(), "v2".to_string()]);
+        assert!(store.text_versions("missing").await.unwrap().is_empty());
+
+        // The re-index swap: drop stale text rows only.
+        store
+            .delete_where("sha512 = 'f' AND modality = 'text' AND pipeline_version != 'v2'")
+            .await
+            .unwrap();
+        assert_eq!(store.text_versions("f").await.unwrap(), vec!["v2".to_string()]);
+        assert_eq!(store.count_for(&["f".into()]).await.unwrap(), 2, "image row survives");
     }
 }

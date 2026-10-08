@@ -1,8 +1,8 @@
 <script lang="ts">
   // Audio/video reader. The media element plays the file straight from the
   // app-data asset URL; below it a timeline shows the soundtrack's waveform,
-  // every search hit in this file as a marker (audio windows below the
-  // waveform midline, video windows above, each lane labelled), and the
+  // every search hit in this file as a marker (audio windows above the
+  // waveform midline, video-frame windows below, each lane labelled), and the
   // playhead. Clicking or
   // dragging the timeline seeks; clicking a marker plays that window.
   // `navigate(startMs, endMs)` (from a result click) seeks to the window, plays
@@ -66,8 +66,9 @@
         const x1 = Math.max(x0 + 2, (m.timeEndMs! / durMs) * width);
         const a = 0.15 + 0.45 * (m.score / best);
         g.fillStyle = m.modality === "video" ? `rgba(57,108,216,${a})` : `rgba(234,179,8,${a})`;
-        if (m.modality === "video") g.fillRect(x0, 0, x1 - x0, mid);
-        else g.fillRect(x0, mid, x1 - x0, mid);
+        // Audio lane on top, visual (video frames) below.
+        if (m.modality === "video") g.fillRect(x0, mid, x1 - x0, mid);
+        else g.fillRect(x0, 0, x1 - x0, mid);
       }
       if (active) {
         const x0 = (active.start / durMs) * width;
@@ -92,7 +93,7 @@
       g.fillRect(0, mid - 1, width, 2);
     }
 
-    // Lane labels (only for lanes that hold matches): picture on top, sound
+    // Lane labels (only for lanes that hold matches): audio on top, visual
     // below — self-explanatory in place, so no separate legend.
     g.font = "10px -apple-system, system-ui, sans-serif";
     g.textBaseline = "top";
@@ -103,8 +104,8 @@
       g.fillStyle = "#475569";
       g.fillText(text, 8, y + 2);
     };
-    if (markers.some((m) => m.modality === "video")) label("Picture", 4);
-    if (markers.some((m) => m.modality === "audio")) label("Sound", mid + 4);
+    if (markers.some((m) => m.modality === "audio")) label("Audio", 4);
+    if (markers.some((m) => m.modality === "video")) label("Visual", mid + 4);
 
     // Playhead.
     if (duration > 0) {

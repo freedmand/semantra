@@ -238,6 +238,12 @@ impl Catalog {
         Ok(read_file_records(&batches).into_iter().next())
     }
 
+    /// Every committed file, across all projects.
+    pub async fn list_files(&self) -> Result<Vec<FileRecord>, String> {
+        let batches = self.scan(&self.files, None).await?;
+        Ok(read_file_records(&batches))
+    }
+
     /// Insert a new file row (caller has already confirmed it is absent).
     pub async fn insert_file(&self, f: &FileRecord) -> Result<(), String> {
         let batch = build_file_batch(f)?;

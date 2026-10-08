@@ -15,6 +15,12 @@ name: Release
 # macOS signing is REQUIRED: the job reads Developer ID + notarization
 # credentials from repository secrets (see APPLE_* below). Missing secrets cause
 # the build to fail at the signing/notarization step — by design.
+#
+# In-app updates: the bundle also produces a minisign-signed .app.tar.gz and
+# tauri-action uploads `latest.json`, which installed apps poll via
+# releases/latest (so an update goes live when the draft is published). The
+# signing key is TAURI_SIGNING_PRIVATE_KEY; its public half is in
+# tauri.conf.json (plugins.updater.pubkey).
 
 on:
   push:
@@ -183,6 +189,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # --- updater artifact signing (minisign) ---
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # Create a draft release only when triggered by a version tag.
           # On manual (workflow_dispatch) runs tagName is empty -> no release;
@@ -191,6 +200,7 @@ jobs:
           releaseName: ${{ startsWith(github.ref, 'refs/tags/v') && format('Semantra {0}', github.ref_name) || '' }}
           releaseDraft: true
           prerelease: false
+          includeUpdaterJson: true
           args: ${{ matrix.args }}
 
       # Dry-run convenience: when not building a release, surface the installer

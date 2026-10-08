@@ -96,11 +96,18 @@ pub trait Chunker {
 ///
 /// A single "word" longer than `size` tokens (minified code, base64, a URL
 /// wall) is hard-split at token boundaries so no window can exceed the budget.
+///
+/// With [`sentences`](Self::sentences) on, a window ends at the last sentence
+/// boundary that fits the budget (falling back to a word cut only when one
+/// sentence alone exceeds it), and the rewind takes whole trailing sentences
+/// only — so chunks read as complete thoughts.
 pub struct TokenWindowChunker<F: Fn(&str) -> Vec<usize>> {
     /// Max tokens per window (excluding the document prompt and specials).
     pub size: usize,
     /// Tokens of rewind shared between consecutive windows (`< size`).
     pub overlap: usize,
+    /// Snap window ends (and rewinds) to sentence boundaries.
+    pub sentences: bool,
     token_starts: F,
 }
 
@@ -112,9 +119,57 @@ impl<F: Fn(&str) -> Vec<usize>> TokenWindowChunker<F> {
         TokenWindowChunker {
             size,
             overlap,
+            sentences: false,
             token_starts,
         }
     }
+
+    /// Snap windows to sentence boundaries (see the type docs).
+    pub fn snap_to_sentences(mut self) -> Self {
+        self.sentences = true;
+        self
+    }
+}
+
+/// Whether a chunk carries any words at all. Chunks of only digits and
+/// punctuation (a lone page number, a dot leader) embed to a near-generic
+/// vector that scores middlingly against every query, so they're not indexed.
+pub fn has_words(text: &str) -> bool {
+    text.chars().any(char::is_alphabetic)
+}
+
+/// Abbreviations whose trailing period doesn't end a sentence (lower-cased).
+const ABBREVIATIONS: &[&str] = &[
+    "mr.", "mrs.", "ms.", "dr.", "prof.", "st.", "jr.", "sr.", "vs.", "e.g.", "i.e.", "no.", "vol.", "fig.",
+    "gen.", "gov.", "sen.", "rep.", "u.s.", "fed.", "crim.", "civ.", "inc.", "co.", "corp.", "ltd.", "jan.",
+    "feb.", "mar.", "apr.", "aug.", "sept.", "sep.", "oct.", "nov.", "dec.", "cf.", "al.", "approx.",
+];
+
+/// Whether `word` (a whitespace-delimited token) ends a sentence: its last
+/// non-closing char is `.`, `!`, `?` or `…` (closing quotes/brackets may
+/// follow), and it isn't a known abbreviation or a lone initial like `J.`.
+fn ends_sentence(word: &str) -> bool {
+    let core = word.trim_end_matches(['"', '\'', '\u{201D}', '\u{2019}', ')', ']', '}']);
+    let Some(last) = core.chars().last() else {
+        return false;
+    };
+    if !matches!(last, '.' | '!' | '?' | '\u{2026}') {
+        return false;
+    }
+    if last == '.' {
+        let lower = core.to_lowercase();
+        let lower = lower.trim_start_matches(['"', '\'', '\u{201C}', '\u{2018}', '(', '[']);
+        if ABBREVIATIONS.contains(&lower) {
+            return false;
+        }
+        let mut cs = lower.chars();
+        if let (Some(c), Some('.'), None) = (cs.next(), cs.next(), cs.next()) {
+            if c.is_alphabetic() {
+                return false; // an initial: "J."
+            }
+        }
+    }
+    true
 }
 
 /// A word and its position within a segment, in both char and byte space (byte
@@ -227,12 +282,47 @@ impl<F: Fn(&str) -> Vec<usize>> Chunker for TokenWindowChunker<F> {
             for (_, c) in &words {
                 cum.push(cum[cum.len() - 1] + c);
             }
+            // boundary[i]: a sentence ends after word i — by punctuation, or at
+            // a paragraph break (a blank line) before the next word. Only the
+            // last piece of a hard-split word can end one (pieces of a word
+            // have no gap between them, and their text rarely ends in `.`).
+            let boundary: Vec<bool> = (0..n)
+                .map(|i| {
+                    let w = &words[i].0;
+                    let gap_end = words.get(i + 1).map_or(seg.text.len(), |(nw, _)| nw.byte_start);
+                    let gap = &seg.text[w.byte_end..gap_end];
+                    ends_sentence(&seg.text[w.byte_start..w.byte_end])
+                        || gap.matches('\n').count() >= 2
+                })
+                .collect();
             let mut start = 0usize;
             loop {
                 // Largest end keeping the window within budget (>= 1 word).
                 let mut end = start + 1;
                 while end < n && cum[end + 1] - cum[start] <= self.size {
                     end += 1;
+                }
+                // Snap back to the last sentence end in the window, unless the
+                // rest of the segment fits or no sentence ends in its back half
+                // (snapping earlier would strand fragments like "R. Crim." or
+                // a lone ". ." from a dot leader — fall back to a word cut).
+                let mut snapped = false;
+                if self.sentences && end < n {
+                    let min_fill = self.size / 2;
+                    if let Some(e) = (start + 1..=end)
+                        .rev()
+                        .take_while(|&e| cum[e] - cum[start] >= min_fill)
+                        .find(|&e| boundary[e - 1])
+                    {
+                        end = e;
+                        snapped = true;
+                    }
+                    // Absorb a short tail (a page-number footer, a final short
+                    // sentence) rather than leave it as its own chunk, letting
+                    // this window run up to a quarter over budget.
+                    if cum[n] - cum[end] < self.size / 8 && cum[n] - cum[start] <= self.size + self.size / 4 {
+                        end = n;
+                    }
                 }
                 let (first, last) = (&words[start].0, &words[end - 1].0);
                 // Verbatim slice from the first word's start to the last word's
@@ -250,9 +340,16 @@ impl<F: Fn(&str) -> Vec<usize>> Chunker for TokenWindowChunker<F> {
                 }
                 // Rewind: the earliest next start sharing <= `overlap` tokens
                 // with this window, while still advancing at least one word.
+                // A sentence-snapped window rewinds by whole sentences only.
                 let mut next = end;
-                while next - 1 > start && cum[end] - cum[next - 1] <= self.overlap {
-                    next -= 1;
+                if snapped {
+                    if let Some(k) = (start + 1..end).find(|&k| boundary[k - 1] && cum[end] - cum[k] <= self.overlap) {
+                        next = k;
+                    }
+                } else {
+                    while next - 1 > start && cum[end] - cum[next - 1] <= self.overlap {
+                        next -= 1;
+                    }
                 }
                 start = next;
             }
@@ -423,6 +520,117 @@ mod tests {
         let c = TokenWindowChunker::new(3, 9, word_starts);
         assert_eq!(c.overlap, 2);
         assert!(c.chunk(&[Segment::flat("a b c d e f g")]).len() >= 2, "window still advances");
+    }
+
+    fn sentence_windows(size: usize, overlap: usize, text: &str) -> Vec<String> {
+        TokenWindowChunker::new(size, overlap, word_starts)
+            .snap_to_sentences()
+            .chunk(&[Segment::flat(text)])
+            .into_iter()
+            .map(|c| c.text)
+            .collect()
+    }
+
+    #[test]
+    fn windows_end_at_sentence_boundaries() {
+        // Budget 6 words: "One two three. Four five." is 5; adding "Six" would
+        // cut the next sentence, so the window stops at the period.
+        let text = "One two three. Four five. Six seven eight nine.";
+        assert_eq!(
+            sentence_windows(6, 0, text),
+            vec!["One two three. Four five.", "Six seven eight nine."]
+        );
+    }
+
+    #[test]
+    fn sentence_rewind_takes_whole_sentences() {
+        // Overlap 2 fits the 2-word sentence "Four five." but not a partial one.
+        let text = "One two three. Four five. Six seven eight.";
+        assert_eq!(
+            sentence_windows(5, 2, text),
+            vec!["One two three. Four five.", "Four five. Six seven eight."]
+        );
+        // Overlap 1 fits no whole sentence: no rewind at all.
+        assert_eq!(
+            sentence_windows(5, 1, text),
+            vec!["One two three. Four five.", "Six seven eight."]
+        );
+    }
+
+    #[test]
+    fn overlong_sentence_falls_back_to_word_cut() {
+        // An 8-word sentence can't fit a 3-word budget: cut at words until a
+        // sentence end fits, then snap again.
+        let text = "one two three four five six seven eight. Done and dusted.";
+        assert_eq!(
+            sentence_windows(3, 0, text),
+            vec!["one two three", "four five six", "seven eight.", "Done and dusted."]
+        );
+    }
+
+    #[test]
+    fn abbreviations_initials_and_quotes() {
+        assert!(!ends_sentence("Mr."));
+        assert!(!ends_sentence("e.g."));
+        assert!(!ends_sentence("J."));
+        assert!(ends_sentence("it."));
+        assert!(ends_sentence("go.\u{201D}"));
+        assert!(ends_sentence("why?)"));
+        assert!(ends_sentence("well\u{2026}"));
+        assert!(!ends_sentence("(score:"));
+        // "Mr. Smith" stays together even when the budget would allow a cut there.
+        assert_eq!(
+            sentence_windows(4, 0, "Hi Mr. Smith left. Bye now."),
+            vec!["Hi Mr. Smith left.", "Bye now."]
+        );
+    }
+
+    #[test]
+    fn no_snapping_into_the_front_half() {
+        // The only sentence end inside the 8-word window is after word 2, which
+        // would strand a fragment; cut at the word budget instead.
+        let text = "Header end. one two three four five six seven eight nine ten.";
+        assert_eq!(
+            sentence_windows(8, 0, text),
+            vec!["Header end. one two three four five six", "seven eight nine ten."]
+        );
+        // Dot leaders: every "." is a sentence end, but none may end a window early.
+        let toc = "Introduction . . . . . . 1 Background . . . . 4";
+        assert!(sentence_windows(8, 0, toc).iter().all(|w| w.split_whitespace().count() >= 4));
+    }
+
+    #[test]
+    fn short_tail_is_absorbed() {
+        // 16-word budget; a trailing page number (1 word < 16/8) joins the
+        // last full window instead of becoming its own chunk.
+        let body = "w ".repeat(14) + "end.";
+        let text = format!("{body} Next sentence starts here and goes on. 44");
+        let out = sentence_windows(16, 0, &text);
+        assert!(out.iter().all(|w| w != "44"), "{out:?}");
+        assert!(out.last().unwrap().ends_with("44"));
+    }
+
+    #[test]
+    fn has_words_rejects_numbers_and_punctuation() {
+        assert!(!has_words("44"));
+        assert!(!has_words(". . ."));
+        assert!(!has_words("§ 12, 34 — (5)"));
+        assert!(has_words("R. Crim."));
+        assert!(has_words("Café 12"));
+    }
+
+    #[test]
+    fn blank_line_is_a_boundary() {
+        let text = "Heading words here\n\nBody one two three.";
+        assert_eq!(sentence_windows(5, 0, text), vec!["Heading words here", "Body one two three."]);
+    }
+
+    #[test]
+    fn sentence_offsets_reconstruct_source_span() {
+        let text = "Alpha beta.  Gamma\u{2014}delta? Epsilon zeta eta.\r\nTheta iota.";
+        for c in TokenWindowChunker::new(4, 2, word_starts).snap_to_sentences().chunk(&[Segment::flat(text)]) {
+            assert_eq!(char_slice(text, c.char_start, c.char_end), c.text);
+        }
     }
 
     fn cell(text: &str, page: usize, col: usize, base_offset: usize) -> Segment {
