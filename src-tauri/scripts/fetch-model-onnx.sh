@@ -34,7 +34,7 @@ for f in "${FILES[@]}"; do
     continue
   fi
   echo "  ${f}"
-  curl -fL --retry 3 --retry-delay 5 "${AUTH[@]}" -o "${DEST}/${f}.part" "${BASE}/${f}"
+  curl -fL --retry 3 --retry-delay 5 ${AUTH[@]+"${AUTH[@]}"} -o "${DEST}/${f}.part" "${BASE}/${f}"
   mv "${DEST}/${f}.part" "${DEST}/${f}"
 done
 du -sh "${DEST}"

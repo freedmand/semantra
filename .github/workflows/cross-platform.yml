@@ -79,15 +79,25 @@ jobs:
 
       # Intel Macs: Microsoft publishes no x86_64 macOS ONNX Runtime after 1.16,
       # so build 1.27 from source once and cache it (~1 h on the runner).
-      - name: Cache ONNX Runtime source build (Intel Mac)
+      # Restored here and saved right after the build (not at job end), so a
+      # later failing step doesn't throw away the ~25 min build.
+      - name: Restore ONNX Runtime source build (Intel Mac)
+        id: ort-cache
         if: matrix.ort == 'macos-x64'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/semantra/onnxruntime-1.27.0/onnxruntime/build/x86_64/Release/libonnxruntime.1.27.0.dylib
           key: onnxruntime-1.27.0-macos-x64-v1
 
       - name: Fetch ONNX Runtime
         run: bash src-tauri/scripts/fetch-onnxruntime.sh ${{ matrix.ort }}
+
+      - name: Save ONNX Runtime source build (Intel Mac)
+        if: matrix.ort == 'macos-x64' && steps.ort-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/semantra/onnxruntime-1.27.0/onnxruntime/build/x86_64/Release/libonnxruntime.1.27.0.dylib
+          key: onnxruntime-1.27.0-macos-x64-v1
 
       - name: Cache ONNX model
         uses: actions/cache@v4
