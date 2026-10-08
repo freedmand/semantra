@@ -121,7 +121,8 @@ jobs:
       - name: Generate test media
         run: |
           mkdir -p "$RUNNER_TEMP/media"
-          ff="$(find "$GITHUB_WORKSPACE/src-tauri/binaries" -name 'ffmpeg-*' 2>/dev/null | head -1)"
+          # No binaries/ on macOS (native decoding): don't let find fail the step.
+          ff="$(find "$GITHUB_WORKSPACE/src-tauri/binaries" -name 'ffmpeg-*' 2>/dev/null | head -1 || true)"
           if [[ -n "$ff" ]]; then
             "$ff" -loglevel error -f lavfi -i testsrc=size=1280x720:rate=1 -frames:v 1 "$RUNNER_TEMP/media/still.png"
             "$ff" -loglevel error -f lavfi -i sine=frequency=440:duration=5 -ar 44100 -ac 2 "$RUNNER_TEMP/media/tone.wav"
