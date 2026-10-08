@@ -265,12 +265,26 @@ fn audio_streams_in_chunks() {
 
 // ------------------------------------------- ffmpeg-generated (skipped if absent)
 
+/// Run the same ffmpeg the decoders use (`set_ffmpeg_path` /
+/// `$SEMANTRA_FFMPEG` / next to the executable / PATH) to make fixtures.
 fn ffmpeg(args: &[&str]) -> bool {
-    Command::new("ffmpeg")
+    Command::new(av::ffmpeg::ffmpeg_path())
         .args(["-hide_banner", "-loglevel", "error", "-y"])
         .args(args)
         .status()
         .is_ok_and(|s| s.success())
+}
+
+/// An H.264 encoder this ffmpeg has: libx264 (GPL builds), else libopenh264
+/// (BSD; in LGPL builds such as the app's sidecar), else the built-in MPEG-4
+/// Part 2 encoder.
+fn h264_encoder() -> &'static str {
+    let out = Command::new(av::ffmpeg::ffmpeg_path())
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    ["libx264", "libopenh264"].into_iter().find(|e| out.contains(e)).unwrap_or("mpeg4")
 }
 
 fn have_ffmpeg() -> bool {
@@ -370,7 +384,7 @@ fn cover_art_is_not_video_and_video_probe() {
         assert!(p.has_audio && !p.has_video, "{p:?}");
     }
     let mp4 = tmp("tone.mp4");
-    assert!(ffmpeg(&[
+    if !ffmpeg(&[
         "-f",
         "lavfi",
         "-i",
@@ -380,14 +394,17 @@ fn cover_art_is_not_video_and_video_probe() {
         "-i",
         "sine=f=440:d=3",
         "-c:v",
-        "libx264",
+        h264_encoder(),
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-shortest",
         mp4.to_str().unwrap(),
-    ]));
+    ]) {
+        eprintln!("this ffmpeg cannot encode the fixture (decode-only build?); skipping");
+        return;
+    }
     let p = av::probe(&mp4).unwrap();
     assert!(p.has_audio && p.has_video && (p.duration_s - 3.0).abs() < 0.1, "{p:?}");
     assert!(decode_all(&mp4).len().abs_diff(48_000) < 200);
@@ -401,7 +418,7 @@ fn frames_rotated_and_scaled() {
     let src = tmp("frames.mp4");
     // Left half red, right half blue; a 1-frame white flash at 1.0 s marks
     // timing.
-    assert!(ffmpeg(&[
+    if !ffmpeg(&[
         "-f",
         "lavfi",
         "-i",
@@ -413,15 +430,21 @@ fn frames_rotated_and_scaled() {
         "-filter_complex",
         "[0][1]overlay=x=320,drawbox=enable='between(n,25,25)':c=white:t=fill",
         "-c:v",
-        "libx264",
+        h264_encoder(),
         "-g",
         "50",
         "-pix_fmt",
         "yuv420p",
         src.to_str().unwrap(),
-    ]));
+    ]) {
+        eprintln!("this ffmpeg cannot encode the fixture (decode-only build?); skipping");
+        return;
+    }
     let rot = tmp("frames_rot90.mp4");
-    assert!(ffmpeg(&["-display_rotation:v:0", "90", "-i", src.to_str().unwrap(), "-c", "copy", rot.to_str().unwrap()]));
+    if !ffmpeg(&["-display_rotation:v:0", "90", "-i", src.to_str().unwrap(), "-c", "copy", rot.to_str().unwrap()]) {
+        eprintln!("this ffmpeg cannot encode the fixture (decode-only build?); skipping");
+        return;
+    }
 
     let f = av::frames_at(&src, &[0.5, 1.0, 1.02, 2.5], 1344, 0.0).unwrap();
     assert_eq!(f.len(), 4);
