@@ -352,3 +352,12 @@ jobs:
           print("platforms:", sorted(platforms))
           sys.exit(f"latest.json is missing {missing}" if missing else 0)
           PY
+
+  # Version-free copies of the installers for the README's "latest" links.
+  stable-download-names:
+    needs: verify-updater-feed
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/stable-download-names.yml
+    with:
+      tag: ${{ github.ref_name }}
+
