@@ -189,9 +189,13 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
+      # tauri-build validates bundle.resources at compile time; Intel Macs
+      # need the ONNX config (Windows/Linux merge theirs automatically).
       - name: App unit tests
         working-directory: src-tauri
-        run: cargo test --release --lib --target ${{ matrix.rust_target }}
+        run: |
+          if [[ "${{ matrix.ort }}" == macos-x64 ]]; then export TAURI_CONFIG="$(cat tauri.onnx.conf.json)"; fi
+          cargo test --release --lib --target ${{ matrix.rust_target }}
 
       # Unsigned installer per platform (the ONNX bundle config is merged
       # automatically on Windows/Linux; Intel Macs pass it explicitly).
