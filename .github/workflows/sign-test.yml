@@ -40,3 +40,18 @@ jobs:
           # Microsoft binaries are already signed; strip to test a fresh signature.
           MSYS_NO_PATHCONV=1 "$SIGNTOOL" remove /s "$(cygpath -w "$RUNNER_TEMP/test.exe")" || true
           bash src-tauri/scripts/sign-windows.sh "$(cygpath -w "$RUNNER_TEMP/test.exe")"
+
+      # Exactly what failed in the v0.3.0 release: Tauri signing the ffmpeg
+      # sidecar via the generated signCommand, with a relative path, from
+      # src-tauri/.
+      - name: Sign the ffmpeg sidecar via the generated signCommand
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        working-directory: src-tauri
+        run: |
+          bash scripts/fetch-ffmpeg.sh windows-x64
+          cmd="$(python -c "import json; print(json.load(open('tauri.windows-sign.conf.json'))['bundle']['windows']['signCommand'])")"
+          echo "signCommand: $cmd"
+          eval "${cmd//%1/'binaries\ffmpeg-x86_64-pc-windows-msvc.exe'}"
+
