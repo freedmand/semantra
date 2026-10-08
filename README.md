@@ -4,17 +4,15 @@ Semantra is a multi-tool for semantic search. You can upload images, text/PDF fi
 and CSVs and index them on your computer entirely locally. You can search the resulting files with
 semantic- and keyword-based search.
 
-Semantra 0.2.2 is Apple Silicon Mac-only and uses Google's open-source EmbeddingGemma2 model
-which runs entirely locally on your machine.
+Semantra 0.3.0 runs on macOS (Apple Silicon and Intel), Windows and Linux, and uses Google's
+open-source EmbeddingGemma2 model, which runs entirely locally on your machine.
 You can download it [here](https://github.com/freedmand/semantra/releases/latest) to get started.
 
-NOTE: For the legacy Python codebase, see: http://github.com/freedmand/semantra-python. For a previous
-version of Semantra desktop that works on other operating systems (and uses a much smaller embedding model),
-download pre-0.2.0 releases.
+NOTE: For the legacy Python codebase, see: http://github.com/freedmand/semantra-python.
 
 ## Development
 
-Semantra 0.2.2 runs on Apple Silicon Mac computers (previous versions work on Windows as well).
+Semantra 0.3.0 runs on Apple Silicon (MLX) and on Windows, Linux and Intel Macs (ONNX Runtime; see below).
 Embeddings come from [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2), which produces
 embeddings combining text, images, audio and video and are run on Apple MLX.
 
