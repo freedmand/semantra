@@ -159,7 +159,10 @@ jobs:
           # Bump when mlx-sys's metallib location changes: a restored build
           # skips mlx-sys's build script, so the kernels wouldn't be regenerated
           # into src-tauri/mlx/ (stage-metallib.sh would then fail the build).
-          prefix-key: "v1-mlx-metallib"
+          prefix-key: "v2-mlx-metallib"
+          # The kernels live outside target/ (MLX_RS_METAL_PATH), so a restored
+          # build would skip regenerating them; cache them alongside.
+          cache-directories: src-tauri/mlx
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
