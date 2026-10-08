@@ -1,31 +1,34 @@
-//! Still images: decode with ImageIO, resize like the reference processor,
-//! and stack into [`PatchGrid`]s for the vision tower.
+//! Still images: decode, resize like the reference processor, and stack into
+//! [`PatchGrid`]s for the vision tower.
 //!
-//! ImageIO opens everything Preview does (JPEG, PNG, HEIC/HEIF, WebP, TIFF,
-//! GIF, BMP, camera RAW, …), applies EXIF orientation, and color-matches into
-//! sRGB. Large photos are decoded subsampled (DCT-domain for JPEG/HEIC) to
-//! [`DECODE_MAX_SIDE`], so a 48 MP photo never materializes at full size.
+//! On macOS, ImageIO opens everything Preview does (JPEG, PNG, HEIC/HEIF,
+//! WebP, TIFF, GIF, BMP, camera RAW, …), applies EXIF orientation, and
+//! color-matches into sRGB. Large photos are decoded subsampled (DCT-domain for
+//! JPEG/HEIC) to [`DECODE_MAX_SIDE`], so a 48 MP photo never materializes at
+//! full size. Elsewhere the portable decoder (`media::portable`) is used.
 
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Result};
 use fast_image_resize::images::Image;
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
-use mlx_rs::Array;
+#[cfg(target_os = "macos")]
 use objc2_core_foundation::{
     CFBoolean, CFDictionary, CFMutableData, CFNumber, CFRetained, CFString, CFType, CFURL, CGPoint, CGRect, CGSize,
 };
+#[cfg(target_os = "macos")]
 use objc2_core_graphics::{
     kCGColorSpaceSRGB, CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage,
     CGImageAlphaInfo,
 };
+#[cfg(target_os = "macos")]
 use objc2_image_io::{
     kCGImageDestinationLossyCompressionQuality, kCGImageSourceCreateThumbnailFromImageAlways,
     kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceThumbnailMaxPixelSize, CGImageDestination,
     CGImageSource,
 };
 
-use crate::vision::PatchGrid;
+use crate::PatchGrid;
 
 /// Longest side images are decoded at before the final resize. Comfortably
 /// above the largest resize target (~1.3k px at 280 soft tokens), so the final
@@ -59,11 +62,13 @@ pub struct Prepared {
 
 /// Decode the first image in `path`, oriented and in sRGB, with transparency
 /// composited over white (as the reference processor's `convert_rgb` does).
+#[cfg(target_os = "macos")]
 pub fn decode(path: &Path) -> Result<Rgb8> {
     decode_max(path, DECODE_MAX_SIDE)
 }
 
 /// [`decode`] with the longer side capped at `max_side` (e.g. thumbnails).
+#[cfg(target_os = "macos")]
 pub fn decode_max(path: &Path, max_side: u32) -> Result<Rgb8> {
     let url = CFURL::from_file_path(path).ok_or_else(|| anyhow!("bad path {}", path.display()))?;
     let src = unsafe { CGImageSource::with_url(&url, None) }
@@ -86,6 +91,7 @@ pub fn decode_max(path: &Path, max_side: u32) -> Result<Rgb8> {
 
 /// Draw a CGImage into an opaque sRGB RGBA8 bitmap (white background) and
 /// drop the alpha channel.
+#[cfg(target_os = "macos")]
 pub fn rgb_from_cgimage(image: &CGImage) -> Result<Rgb8> {
     let (w, h) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
     if w == 0 || h == 0 {
@@ -115,7 +121,11 @@ pub fn rgb_from_cgimage(image: &CGImage) -> Result<Rgb8> {
     Ok(Rgb8 { width: w as u32, height: h as u32, data })
 }
 
+#[cfg(not(target_os = "macos"))]
+pub use super::portable::image::{decode, decode_max, encode_jpeg};
+
 /// Encode RGB pixels as a JPEG (`quality` in 0–1), for previews/thumbnails.
+#[cfg(target_os = "macos")]
 pub fn encode_jpeg(img: &Rgb8, quality: f64) -> Result<Vec<u8>> {
     let (w, h) = (img.width as usize, img.height as usize);
     let mut rgba: Vec<u8> = img.data.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect();
@@ -201,6 +211,7 @@ pub fn prepare(img: &Rgb8, soft_tokens: u32) -> Result<Prepared> {
 
 /// Stack same-grid images into one batch. All inputs must share `rows`/`cols`
 /// (group by [`Prepared::grid`] first).
+#[cfg(backend_mlx)]
 pub fn stack(images: &[&Prepared]) -> Result<PatchGrid> {
     let first = images.first().ok_or_else(|| anyhow!("no images to stack"))?;
     if images.iter().any(|p| p.grid() != first.grid()) {
@@ -208,11 +219,33 @@ pub fn stack(images: &[&Prepared]) -> Result<PatchGrid> {
     }
     let (h, w) = ((first.rows * PATCH) as i32, (first.cols * PATCH) as i32);
     let data: Vec<u8> = images.iter().flat_map(|p| p.pixels.iter().copied()).collect();
-    let pixels = Array::from_slice(&data, &[images.len() as i32, h, w, 3])
+    let pixels = mlx_rs::Array::from_slice(&data, &[images.len() as i32, h, w, 3])
         .as_dtype(mlx_rs::Dtype::Float32)?
-        .divide(Array::from_f32(255.0))?;
+        .divide(mlx_rs::Array::from_f32(255.0))?;
     Ok(PatchGrid {
         pixels,
+        rows: first.rows as i32,
+        cols: first.cols as i32,
+    })
+}
+
+/// Stack same-grid images into one batch of CPU patches (see [`patchify`]).
+#[cfg(backend_onnx)]
+pub fn stack(images: &[&Prepared]) -> Result<PatchGrid> {
+    let first = images.first().ok_or_else(|| anyhow!("no images to stack"))?;
+    if images.iter().any(|p| p.grid() != first.grid()) {
+        bail!("cannot stack images with different patch grids");
+    }
+    let (mut pixels, mut positions) = (Vec::new(), Vec::new());
+    for p in images {
+        let (px, pos) = patchify(p);
+        pixels.extend(px);
+        positions.extend(pos);
+    }
+    Ok(PatchGrid {
+        pixels,
+        positions,
+        frames: images.len(),
         rows: first.rows as i32,
         cols: first.cols as i32,
     })

@@ -1,10 +1,12 @@
 //! Log-mel features for the audio tower (the reference
-//! `Gemma4AudioFeatureExtractor`, computed on the GPU with MLX).
+//! `Gemma4AudioFeatureExtractor`): on the GPU with MLX ([`log_mel`]), or on the
+//! CPU for the ONNX backend ([`log_mel_cpu`]).
 //!
 //! 16 kHz mono -> 20 ms Hann frames every 10 ms (semicausal: 10 ms of leading
 //! silence) -> |rFFT₅₁₂| -> 128 HTK mel bins (0–8 kHz) -> ln(x + 0.001).
 
 use anyhow::{bail, Result};
+#[cfg(backend_mlx)]
 use mlx_rs::{ops, Array, Dtype};
 
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -30,6 +32,7 @@ pub fn frame_counts(samples: usize) -> (usize, usize) {
     (frames, valid)
 }
 
+#[cfg(backend_mlx)]
 /// Log-mel features for a batch of equal-length 16 kHz mono clips:
 /// (B, frames, 128) F32, with padded frames zeroed, plus their (B, frames)
 /// validity mask.
@@ -134,6 +137,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(backend_mlx)]
     fn cpu_log_mel_matches_mlx() {
         let clip: Vec<f32> = (0..40_000).map(|i| ((i as f32) * 0.031).sin() * 0.3 + ((i as f32) * 0.0047).cos() * 0.2).collect();
         let (cpu, frames, valid) = log_mel_cpu(&clip).unwrap();

@@ -20,8 +20,8 @@ use anyhow::{bail, Result};
 use mlx_rs::ops::indexing::IndexOp;
 use mlx_rs::{fast, ops, Array, Dtype};
 
-use crate::text::{split_last, Linear};
-use crate::weights::Scope;
+use crate::mlx::text::{split_last, Linear};
+use crate::mlx::weights::Scope;
 
 const EPS: f32 = 1e-6;
 const CHUNK: i32 = 12;
