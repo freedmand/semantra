@@ -1,0 +1,58 @@
+name: Windows signing test
+
+# Fast check of Azure Trusted Signing outside a full release: set up signing
+# exactly as release.yml does and sign one executable. Run on demand, or by
+# pushing a branch named sign-test/**.
+
+on:
+  push:
+    branches:
+      - "sign-test/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  sign:
+    runs-on: windows-latest
+    environment: release
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Windows code signing
+        env:
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+        run: bash src-tauri/scripts/setup-windows-signing.sh
+
+      - name: Sign a test executable
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          cp "$(cygpath -u "$WINDIR")/System32/where.exe" "$RUNNER_TEMP/test.exe"
+          # Microsoft binaries are already signed; strip to test a fresh signature.
+          MSYS_NO_PATHCONV=1 "$SIGNTOOL" remove /s "$(cygpath -w "$RUNNER_TEMP/test.exe")" || true
+          bash src-tauri/scripts/sign-windows.sh "$(cygpath -w "$RUNNER_TEMP/test.exe")"
+
+      # Exactly what failed in the v0.3.0 release: Tauri signing the ffmpeg
+      # sidecar via the generated signCommand, with a relative path, from
+      # src-tauri/.
+      - name: Sign the ffmpeg sidecar via the generated signCommand
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        working-directory: src-tauri
+        run: |
+          bash scripts/fetch-ffmpeg.sh windows-x64
+          cmd="$(python -c "import json; print(json.load(open('tauri.windows-sign.conf.json'))['bundle']['windows']['signCommand'])")"
+          echo "signCommand: $cmd"
+          script="${cmd#bash }"; script="${script% %1}"
+          bash "$script" 'binaries\ffmpeg-x86_64-pc-windows-msvc.exe'
+
