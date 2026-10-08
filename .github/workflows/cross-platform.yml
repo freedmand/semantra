@@ -104,7 +104,8 @@ jobs:
         env:
           SEMANTRA_ORT_EP: cpu
         run: |
-          lib="$(ls "$GITHUB_WORKSPACE"/src-tauri/onnxruntime/*onnxruntime.{dll,so,dylib} 2>/dev/null | head -1)"
+          lib="$(find "$GITHUB_WORKSPACE/src-tauri/onnxruntime" -maxdepth 1 \( -name onnxruntime.dll -o -name libonnxruntime.so -o -name libonnxruntime.dylib \) | head -1)"
+          echo "ONNX Runtime: $lib"
           ORT_DYLIB_PATH="$lib" cargo run --release --target ${{ matrix.rust_target }} --example smoke -- \
             "$GITHUB_WORKSPACE/src-tauri/models/embeddinggemma-2-onnx"
 
