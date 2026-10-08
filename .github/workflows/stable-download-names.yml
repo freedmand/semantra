@@ -1,0 +1,52 @@
+name: Stable download names
+
+# Attach copies of a release's installers under version-free names, so
+# https://github.com/freedmand/semantra/releases/latest/download/<name> (linked
+# from the README) always serves the newest release. The versioned originals
+# stay: the in-app updater feed (latest.json) points at them.
+#
+# Called by release.yml after a tag build; run by hand for an existing tag.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.3.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  copy:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Upload version-free copies
+        run: |
+          set -euo pipefail
+          v="${TAG#v}"
+          # versioned asset -> stable name (keep in sync with the README links)
+          declare -A names=(
+            ["Semantra_${v}_aarch64.dmg"]="Semantra-macOS-AppleSilicon.dmg"
+            ["Semantra_${v}_x64.dmg"]="Semantra-macOS-Intel.dmg"
+            ["Semantra_${v}_x64-setup.exe"]="Semantra-Windows-x64-setup.exe"
+            ["Semantra_${v}_amd64.AppImage"]="Semantra-Linux-x86_64.AppImage"
+            ["Semantra_${v}_amd64.deb"]="Semantra-Linux-amd64.deb"
+          )
+          mkdir -p dl
+          for src in "${!names[@]}"; do
+            dst="${names[$src]}"
+            gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p "$src" -D dl --clobber
+            mv "dl/$src" "dl/$dst"
+            gh release upload "$TAG" -R "$GITHUB_REPOSITORY" "dl/$dst" --clobber
+            rm -f "dl/$dst"
+            echo "uploaded $dst (from $src)"
+          done

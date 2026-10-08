@@ -4,9 +4,22 @@ Semantra is a multi-tool for semantic search. You can upload images, text/PDF fi
 and CSVs and index them on your computer entirely locally. You can search the resulting files with
 semantic- and keyword-based search.
 
-Semantra 0.3.0 runs on macOS (Apple Silicon and Intel), Windows and Linux, and uses Google's
+Semantra runs on macOS (Apple Silicon and Intel), Windows and Linux, and uses Google's
 open-source EmbeddingGemma2 model, which runs entirely locally on your machine.
-You can download it [here](https://github.com/freedmand/semantra/releases/latest) to get started.
+
+## Download
+
+| Platform | Download |
+|---|---|
+| macOS — Apple Silicon (M1 or later) | [**Semantra-macOS-AppleSilicon.dmg**](https://github.com/freedmand/semantra/releases/latest/download/Semantra-macOS-AppleSilicon.dmg) |
+| macOS — Intel | [**Semantra-macOS-Intel.dmg**](https://github.com/freedmand/semantra/releases/latest/download/Semantra-macOS-Intel.dmg) |
+| Windows 10/11 (64-bit) | [**Semantra-Windows-x64-setup.exe**](https://github.com/freedmand/semantra/releases/latest/download/Semantra-Windows-x64-setup.exe) |
+| Linux (64-bit) | [**Semantra-Linux-x86_64.AppImage**](https://github.com/freedmand/semantra/releases/latest/download/Semantra-Linux-x86_64.AppImage) · [**.deb**](https://github.com/freedmand/semantra/releases/latest/download/Semantra-Linux-amd64.deb) |
+
+Each download is about 1 GB, because the model is bundled so everything works offline. Not sure
+which Mac you have? Apple menu → **About This Mac**: "Chip: Apple M…" means Apple Silicon. Once
+installed, Semantra updates itself. Release notes and older versions are on the
+[releases page](https://github.com/freedmand/semantra/releases).
 
 NOTE: For the legacy Python codebase, see: http://github.com/freedmand/semantra-python.
 
