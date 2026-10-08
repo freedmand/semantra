@@ -53,5 +53,6 @@ jobs:
           bash scripts/fetch-ffmpeg.sh windows-x64
           cmd="$(python -c "import json; print(json.load(open('tauri.windows-sign.conf.json'))['bundle']['windows']['signCommand'])")"
           echo "signCommand: $cmd"
-          eval "${cmd//%1/'binaries\ffmpeg-x86_64-pc-windows-msvc.exe'}"
+          script="${cmd#bash }"; script="${script% %1}"
+          bash "$script" 'binaries\ffmpeg-x86_64-pc-windows-msvc.exe'
 
