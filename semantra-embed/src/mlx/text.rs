@@ -27,7 +27,7 @@ use mlx_rs::transforms::compile::compile;
 use mlx_rs::{fast, ops, Array, Dtype};
 
 use crate::config::TextConfig;
-use crate::weights::Scope;
+use crate::mlx::weights::Scope;
 
 /// Weight-only linear layer (`y = x · Wᵀ`); none of the towers use biases.
 pub(crate) struct Linear(Array);

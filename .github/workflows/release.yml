@@ -1,18 +1,21 @@
 name: Release
 
-# Builds the signed/notarized macOS (Apple Silicon) installer via tauri-action.
-# Semantra's embedding runtime is MLX (Metal), so Apple Silicon is the only
-# target.
+# Builds installers for every platform via tauri-action:
+#   • macOS (Apple Silicon): MLX backend; signed + notarized.
+#   • macOS (Intel): ONNX Runtime backend; signed + notarized.
+#   • Windows x64 (NSIS) and Linux x64 (deb, AppImage): ONNX Runtime backend;
+#     not code-signed yet (Windows SmartScreen will warn on first run).
 #
 #   • Push a tag `vX.Y.Z`  -> builds and uploads to a DRAFT GitHub Release.
 #   • Run manually (Actions -> Release -> Run workflow) -> builds and uploads the
 #                             installer as a workflow artifact (dry run).
 #
 # The EmbeddingGemma 2 weights (~1.5 GB BF16, gitignored) are fetched ONCE in
-# the `prepare-model` job and shared to the build job as an artifact. They are
-# used as published — never converted to F16 (the model overflows F16).
+# the `prepare-model` job and shared to the MLX build as an artifact; they are
+# used as published — never converted to F16 (the model overflows F16). ONNX
+# builds fetch the onnx-community fp16 export instead (cached).
 #
-# macOS signing is REQUIRED: the job reads Developer ID + notarization
+# macOS signing is REQUIRED on the macOS jobs: they read Developer ID + notarization
 # credentials from repository secrets (see APPLE_* below). Missing secrets cause
 # the build to fail at the signing/notarization step — by design.
 #
@@ -66,15 +69,53 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Apple Silicon: the MLX backend (BF16 safetensors + Metal kernels).
           - name: macOS (Apple Silicon)
             os: macos-26
+            backend: mlx
             rust_target: aarch64-apple-darwin
             toolchain_targets: aarch64-apple-darwin
+            pdfium: pdfium-mac-arm64.tgz
             args: "--target aarch64-apple-darwin"
+          # Everything else: the ONNX Runtime backend (fp16 ONNX export + a
+          # bundled runtime; see scripts/fetch-onnxruntime.sh).
+          - name: macOS (Intel)
+            os: macos-15-intel
+            backend: onnx
+            ort: macos-x64
+            rust_target: x86_64-apple-darwin
+            toolchain_targets: x86_64-apple-darwin
+            pdfium: pdfium-mac-x64.tgz
+            args: "--target x86_64-apple-darwin --config src-tauri/tauri.onnx.conf.json"
+          - name: Windows x64
+            os: windows-latest
+            backend: onnx
+            ort: windows-x64
+            rust_target: x86_64-pc-windows-msvc
+            toolchain_targets: x86_64-pc-windows-msvc
+            args: "--target x86_64-pc-windows-msvc"
+          - name: Linux x64
+            os: ubuntu-22.04
+            backend: onnx
+            ort: linux-x64
+            rust_target: x86_64-unknown-linux-gnu
+            toolchain_targets: x86_64-unknown-linux-gnu
+            args: "--target x86_64-unknown-linux-gnu"
 
+    name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libgtk-3-dev patchelf
 
       # MLX (built from source by mlx-sys via CMake) compiles Metal shaders;
       # Xcode 26 ships the Metal toolchain as a separate download. The macOS 26
@@ -82,6 +123,7 @@ jobs:
       # .minimumSystemVersion), which enables MLX's M5 neural-accelerator
       # kernels.
       - name: Install Metal toolchain
+        if: matrix.backend == 'mlx'
         run: |
           sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)/Contents/Developer"
           xcodebuild -version
@@ -106,6 +148,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
+          key: ${{ matrix.rust_target }}
           # Bump when mlx-sys's metallib location changes: a restored build
           # skips mlx-sys's build script, so the kernels wouldn't be regenerated
           # into src-tauri/mlx/ (stage-metallib.sh would then fail the build).
@@ -128,10 +171,47 @@ jobs:
       # Restore the shared weights so the bundle resource
       # (models/embeddinggemma-2/*) is present at build time.
       - name: Download model artifact
+        if: matrix.backend == 'mlx'
         uses: actions/download-artifact@v4
         with:
           name: model-embeddinggemma-2
           path: src-tauri/models/embeddinggemma-2
+
+      # ONNX backend: the fp16 export and this platform's ONNX Runtime library
+      # (Intel Macs build it from source once; cached).
+      # Restored here and saved right after the build (not at job end), so a
+      # later failing step doesn't throw away the ~25 min build.
+      - name: Restore ONNX Runtime source build (Intel Mac)
+        id: ort-cache
+        if: matrix.ort == 'macos-x64'
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/semantra/onnxruntime-1.27.0/onnxruntime/build/x86_64/Release/libonnxruntime.1.27.0.dylib
+          key: onnxruntime-1.27.0-macos-x64-v1
+
+      - name: Fetch ONNX Runtime
+        if: matrix.backend == 'onnx'
+        run: bash src-tauri/scripts/fetch-onnxruntime.sh ${{ matrix.ort }}
+
+      - name: Save ONNX Runtime source build (Intel Mac)
+        if: matrix.ort == 'macos-x64' && steps.ort-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/semantra/onnxruntime-1.27.0/onnxruntime/build/x86_64/Release/libonnxruntime.1.27.0.dylib
+          key: onnxruntime-1.27.0-macos-x64-v1
+
+      - name: Cache ONNX model
+        if: matrix.backend == 'onnx'
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/models/embeddinggemma-2-onnx
+          key: embeddinggemma-2-onnx-fp16-v1
+
+      - name: Fetch ONNX model
+        if: matrix.backend == 'onnx'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: bash src-tauri/scripts/fetch-model-onnx.sh
 
       # Notarization requires EVERY Mach-O in the bundle to be Developer-ID-signed
       # with a secure timestamp. Tauri signs the main binary + the .app, but the
@@ -140,6 +220,7 @@ jobs:
       # and drop it where build.rs caches it (build.rs skips the download when the
       # file already exists), so the bundle picks up the signed copy. macOS only.
       - name: Pre-sign bundled libpdfium
+        if: runner.os == 'macOS'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -150,7 +231,7 @@ jobs:
           PDFIUM_TAG="chromium%2F7881"
           BASE="https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}"
           mkdir -p src-tauri/libpdfium
-          curl -fSL --retry 3 -o "$RUNNER_TEMP/pdfium.tgz" "$BASE/pdfium-mac-arm64.tgz"
+          curl -fSL --retry 3 -o "$RUNNER_TEMP/pdfium.tgz" "$BASE/${{ matrix.pdfium }}"
           tar xzf "$RUNNER_TEMP/pdfium.tgz" -C "$RUNNER_TEMP" lib/libpdfium.dylib
           cp "$RUNNER_TEMP/lib/libpdfium.dylib" src-tauri/libpdfium/libpdfium.dylib
 
@@ -173,6 +254,11 @@ jobs:
           echo "--- libpdfium signature ---"
           codesign -dvv src-tauri/libpdfium/libpdfium.dylib 2>&1 \
             | grep -iE "Authority|Timestamp|Signature|Runtime" || true
+          # The ONNX backend's bundled runtime is a loose dylib too (Intel).
+          if [[ -f src-tauri/onnxruntime/libonnxruntime.dylib ]]; then
+            codesign --force --timestamp --options runtime \
+              --sign "$APPLE_SIGNING_IDENTITY" src-tauri/onnxruntime/libonnxruntime.dylib
+          fi
           rm -f "$RUNNER_TEMP/cert.p12"
 
       - name: Build and bundle
@@ -213,3 +299,27 @@ jobs:
           path: src-tauri/target/${{ matrix.rust_target }}/release/bundle/**/*
           retention-days: 7
           if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # The four build jobs each merge their platform into the release's
+  # latest.json (the in-app updater feed) in parallel; fail loudly if a race
+  # dropped one, so it can be re-run before publishing.
+  # ---------------------------------------------------------------------------
+  verify-updater-feed:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check latest.json lists every platform
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${GITHUB_REF_NAME}" -R "${GITHUB_REPOSITORY}" -p latest.json -O latest.json
+          python3 - <<'PY'
+          import json, sys
+          platforms = json.load(open("latest.json"))["platforms"]
+          need = ["darwin-aarch64", "darwin-x86_64", "windows-x86_64", "linux-x86_64"]
+          missing = [p for p in need if p not in platforms]
+          print("platforms:", sorted(platforms))
+          sys.exit(f"latest.json is missing {missing}" if missing else 0)
+          PY

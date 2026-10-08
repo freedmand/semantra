@@ -37,6 +37,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Integration tests open a temp LanceDB connection directly to construct stores.
 lancedb = "0.30"
 
+[features]
+# Run the ONNX Runtime embedding backend on Apple Silicon too (the default
+# there is MLX; every other platform always uses ONNX). For local testing.
+onnx = ["semantra-embed/onnx"]
+
 [dependencies]
 # `protocol-asset` enables the `asset:`/`convertFileSrc` protocol so PDF.js can
 # stream copied PDFs from the app-data dir (scoped in tauri.conf.json).
@@ -51,7 +56,9 @@ tauri-plugin-updater = "~2.12"
 tauri-plugin-process = "~2.3"
 # Native alert for startup failures (before the webview is usable). Already in
 # the tree via tauri-plugin-dialog.
-rfd = "0.16"
+# gtk3 on Linux: the backend tauri-plugin-dialog uses (rfd rejects mixing it
+# with its default xdg-portal backend). Ignored on macOS/Windows.
+rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

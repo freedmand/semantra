@@ -13,8 +13,8 @@
 use anyhow::{bail, Result};
 use mlx_rs::{fast, ops, Array, Dtype};
 
-use crate::text::{gelu_mul, Linear, RmsNorm};
-use crate::weights::Scope;
+use crate::mlx::text::{gelu_mul, Linear, RmsNorm};
+use crate::mlx::weights::Scope;
 
 const PATCH: i32 = 16;
 const POOL: i32 = 3;
@@ -162,7 +162,7 @@ impl VisionModel {
 
     fn block(&self, blk: &Block, x: &Array, cos: &Array, sin: &Array) -> Result<Array> {
         let (b, l) = (x.shape()[0], x.shape()[1]);
-        let qkv = crate::text::split_last(&blk.qkv.forward(&blk.input_norm.forward(x)?)?, &blk.qkv_sizes)?;
+        let qkv = crate::mlx::text::split_last(&blk.qkv.forward(&blk.input_norm.forward(x)?)?, &blk.qkv_sizes)?;
         let heads = |y: &Array| y.reshape(&[b, l, self.heads, self.head_dim]);
         let q = rope_2d(&blk.q_norm.forward(&heads(&qkv[0])?)?, cos, sin)?;
         let k = rope_2d(&blk.k_norm.forward(&heads(&qkv[1])?)?, cos, sin)?;
@@ -172,7 +172,7 @@ impl VisionModel {
         let out = out.transpose_axes(&[0, 2, 1, 3])?.reshape(&[b, l, -1])?;
         let x = x.add(blk.post_attn_norm.forward(&blk.o.forward(&out)?)?)?;
 
-        let gu = crate::text::split_last(&blk.gate_up.forward(&blk.pre_ff_norm.forward(&x)?)?, &blk.gate_up_sizes)?;
+        let gu = crate::mlx::text::split_last(&blk.gate_up.forward(&blk.pre_ff_norm.forward(&x)?)?, &blk.gate_up_sizes)?;
         let m = blk.down.forward(&gelu_mul(&gu[0], &gu[1])?)?;
         Ok(x.add(blk.post_ff_norm.forward(&m)?)?)
     }

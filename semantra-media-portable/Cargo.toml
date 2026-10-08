@@ -1,0 +1,24 @@
+[package]
+name = "semantra-media-portable"
+version = "0.1.0"
+edition = "2021"
+description = "Portable (Windows/Linux) media decoding with the same API as semantra-embed's macOS ImageIO/AVFoundation decoders"
+
+[dependencies]
+anyhow = "1"
+# Stills: decoders for the common web/camera formats, EXIF orientation via
+# `ImageDecoder::orientation`, JPEG encoding for thumbnails.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "tiff", "bmp"] }
+# ICC -> sRGB conversion (pure Rust), so wide-gamut photos (iPhone Display P3,
+# Adobe RGB) come out in the colors ImageIO would produce.
+moxcms = "0.8"
+# SIMD downscaling (already a semantra-embed dependency).
+fast_image_resize = "6"
+# Audio and video soundtracks: MP3, AAC/ALAC in MP4/M4A/MOV, FLAC, WAV, AIFF,
+# Vorbis/Ogg, MKV/WebM demuxing.
+symphonia = { version = "0.5", features = ["all"] }
+# 16 kHz resampling.
+rubato = "0.16"
+# DCT-domain downscaled JPEG decode (1/2, 1/4, 1/8) for big photos.
+jpeg-decoder = { version = "0.3", default-features = false }
+
