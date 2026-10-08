@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Semantra",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "com.semantra.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -50,6 +50,15 @@
     "macOS": {
       "minimumSystemVersion": "26.2",
       "entitlements": "Entitlements.plist"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU0ODU2MTNFRjIwMTIyNTkKUldSWklnSHlQbUdGNU9LNEdrTEx4elQwZ0hmUzkrQU9YQzV6NDBtb0lKV1haTStQYkdqMXNPTVEK",
+      "endpoints": [
+        "https://github.com/freedmand/semantra/releases/latest/download/latest.json"
+      ]
     }
   }
 }

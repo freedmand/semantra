@@ -106,7 +106,8 @@ fn extract_literals(raw: &str) -> (String, Vec<String>) {
     (remainder, literals)
 }
 
-/// Split `text` into weighted semantic terms on `+`/`-` boundaries.
+/// Split `text` into weighted semantic terms on `+`/`-` operators (a sign that
+/// starts the text or follows whitespace; one inside a word is literal text).
 fn parse_weighted_terms(text: &str) -> Vec<WeightedTerm> {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
@@ -138,9 +139,9 @@ fn parse_weighted_terms(text: &str) -> Vec<WeightedTerm> {
         while i < n && chars[i].is_whitespace() {
             i += 1;
         }
-        // Term text runs until the next sign.
+        // Term text runs until the next operator: a sign after whitespace.
         let text_start = i;
-        while i < n && chars[i] != '+' && chars[i] != '-' {
+        while i < n && !((chars[i] == '+' || chars[i] == '-') && i > 0 && chars[i - 1].is_whitespace()) {
             i += 1;
         }
         let term: String = chars[text_start..i].iter().collect();
@@ -318,6 +319,18 @@ mod tests {
     fn plus_and_minus_terms() {
         assert_eq!(parse_query("dog + cat").semantic, terms(&[("dog", 1.0), ("cat", 1.0)]));
         assert_eq!(parse_query("dog - cat").semantic, terms(&[("dog", 1.0), ("cat", -1.0)]));
+    }
+
+    #[test]
+    fn signs_inside_words_are_text() {
+        assert_eq!(
+            parse_query("left-wing rioters").semantic,
+            terms(&[("left-wing rioters", 1.0)])
+        );
+        assert_eq!(parse_query("COVID-19 e-mail").semantic, terms(&[("COVID-19 e-mail", 1.0)]));
+        assert_eq!(parse_query("C++ code").semantic, terms(&[("C++ code", 1.0)]));
+        assert_eq!(parse_query("left-wing -riots").semantic, terms(&[("left-wing", 1.0), ("riots", -1.0)]));
+        assert_eq!(parse_query("-cats").semantic, terms(&[("cats", -1.0)]));
     }
 
     #[test]

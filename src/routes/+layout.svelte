@@ -6,6 +6,7 @@
   import "../app.css";
   import { onMount } from "svelte";
   import { initLiveUpdates, refreshProjects } from "$lib/state.svelte";
+  import UpdatePrompt from "$lib/UpdatePrompt.svelte";
 
   let { children } = $props();
 
@@ -16,3 +17,4 @@
 </script>
 
 {@render children()}
+<UpdatePrompt />

@@ -82,12 +82,14 @@ const INSERT_BATCH: usize = 1024;
 const MAINTENANCE_ROW_THRESHOLD: usize = 50_000;
 
 /// Tokens per text chunk (excluding the document prompt) and the rewind shared
-/// between consecutive windows. Chosen by a retrieval eval (SQuAD articles as
-/// documents): quality is flat from 64 to 256 tokens and dips beyond, while
-/// 256 halves the vector count vs 128. Both are baked into
-/// [`pipeline_version`], so changing either triggers re-indexing.
-const CHUNK_TOKENS: usize = 256;
-const CHUNK_OVERLAP_TOKENS: usize = 32;
+/// between consecutive windows; windows snap to sentence ends (see
+/// [`TokenWindowChunker::snap_to_sentences`]) and rewind by whole sentences.
+/// A retrieval eval (SQuAD articles as documents) found quality flat from 64 to
+/// 256 tokens; 128 keeps a hit short enough to read in full in the results
+/// list. Both are baked into [`text_pipeline_version`], so changing either
+/// re-chunks text (only) on the next launch.
+const CHUNK_TOKENS: usize = 128;
+const CHUNK_OVERLAP_TOKENS: usize = 16;
 
 /// The embedding model directory under `models/` (bundled as a resource and in
 /// the dev tree): a copy of `google/embeddinggemma-2` (see fetch-model.sh).
@@ -97,15 +99,22 @@ pub const MODEL_NAME: &str = "embeddinggemma-2";
 /// little quality for 1.5x/3x smaller vectors.
 pub const EMBED_DIM: usize = 768;
 
-/// Identifies the chunking + embedding approach that produced a file's chunks,
-/// stored per file/chunk so a change can be detected and stale data re-indexed.
-/// Derived from the model, output width, prompt and chunk geometry, so changing
-/// any of them invalidates old vectors automatically. Bump the schema rev by
-/// hand only for changes not already captured here (v2: store schema; v3: PDF
-/// page renders at full resolution instead of PDFium's 72 dpi default).
+/// Identifies the embedding approach behind every stored vector: model, output
+/// width, precision and prompt. Changing it invalidates all vectors (text and
+/// media), so the whole library is re-indexed. Bump the schema rev by hand only
+/// for changes not already captured here (v2: store schema; v3: PDF page
+/// renders at full resolution instead of PDFium's 72 dpi default).
 pub fn pipeline_version() -> String {
+    format!("v3:{MODEL_NAME}@{EMBED_DIM}:bf16:prompt-none")
+}
+
+/// [`pipeline_version`] plus the text chunk geometry, stamped on text rows.
+/// When only this changes, a background pass re-chunks text and keeps every
+/// media vector (see [`reindex_text`]).
+pub fn text_pipeline_version() -> String {
     format!(
-        "v3:{MODEL_NAME}@{EMBED_DIM}:bf16:prompt-none:tokenwindow:{CHUNK_TOKENS}-{CHUNK_OVERLAP_TOKENS}"
+        "{}:tokenwindow:{CHUNK_TOKENS}-{CHUNK_OVERLAP_TOKENS}:sentences-v3",
+        pipeline_version()
     )
 }
 
@@ -117,8 +126,12 @@ fn doc_prompt() -> String {
 }
 
 /// `db_meta` key under which the [`pipeline_version`] the on-disk vectors were
-/// built with is stored, so a model/chunker change is detected at startup.
+/// built with is stored, so a model change is detected at startup.
 const DB_MODEL_KEY: &str = "active_pipeline";
+
+/// `db_meta` key for the [`text_pipeline_version`] all text rows are known to
+/// match; set once a text-only re-index pass completes.
+const DB_TEXT_KEY: &str = "active_text_pipeline";
 
 /// Resolve the directory that holds the bundled model files (resource dir, then
 /// dev-tree fallback — `tauri dev` does not reliably copy resources).
@@ -244,7 +257,7 @@ async fn run_index_pipeline(
                 page_char_start: c.page_char_start as i64,
                 time_start_ms: None,
                 time_end_ms: None,
-                pipeline_version: pipeline_version(),
+                pipeline_version: text_pipeline_version(),
                 vector,
             });
         }
@@ -775,10 +788,7 @@ async fn process_job(app: &AppHandle, job: &Job) -> Result<(), String> {
         .map(|m| m.len() as i64)
         .unwrap_or(0);
 
-    // CSVs index one chunk per cell (the segments are already cells); everything
-    // else uses token windows sized by the model's own tokenizer.
     let embedder = (*app.state::<EmbedService>()).clone();
-    let tokenizer = Arc::clone(embedder.tokenizer());
     // The media planner only needs page texts (to budget PDF page renders).
     let extracted_meta = extract::Extracted {
         filetype,
@@ -786,23 +796,10 @@ async fn process_job(app: &AppHandle, job: &Job) -> Result<(), String> {
         segments: extracted.segments.clone(),
         page_count: extracted.page_count,
     };
-    let chunks = tauri::async_runtime::spawn_blocking(move || match filetype {
-        extract::FileType::Csv => CellChunker.chunk(&extracted.segments),
-        _ => TokenWindowChunker::new(CHUNK_TOKENS, CHUNK_OVERLAP_TOKENS, |text: &str| {
-            match tokenizer.encode(text, false) {
-                Ok(e) => e.get_offsets().iter().map(|o| o.0).collect(),
-                Err(e) => {
-                    // Falls back to ~1 token per word; inputs are still capped
-                    // by the model's truncation (MAX_INPUT_TOKENS).
-                    eprintln!("[semantra] tokenize segment for chunking failed: {e}");
-                    Vec::new()
-                }
-            }
-        })
-        .chunk(&extracted.segments),
-    })
-    .await
-    .map_err(|e| format!("chunk task panicked: {e}"))?;
+    let for_chunking = embedder.clone();
+    let chunks = tauri::async_runtime::spawn_blocking(move || chunk_segments(&for_chunking, filetype, &extracted.segments))
+        .await
+        .map_err(|e| format!("chunk task panicked: {e}"))?;
 
     // Media pass (PDF page renders, images, audio/video windows): planned up
     // front so one progress total covers text + media.
@@ -861,6 +858,39 @@ async fn process_job(app: &AppHandle, job: &Job) -> Result<(), String> {
     let remaining = catalog.lock().await.job_counts(&job.project_id).await?.0;
     emit_index(app, job, "fileDone", 0, 0, remaining, "");
     Ok(())
+}
+
+/// Chunk extracted segments for embedding. CSVs index one chunk per cell (the
+/// segments are already cells); everything else uses sentence-snapped token
+/// windows sized by the model's own tokenizer, minus windows with no words.
+fn chunk_segments(embedder: &EmbedService, filetype: extract::FileType, segments: &[chunk::Segment]) -> Vec<Chunk> {
+    // The shared tokenizer truncates at the model's input cap (2048 tokens),
+    // which would leave the rest of a long segment (a whole plain-text file,
+    // a dense page) without token offsets — costed ~1 token per word, so its
+    // windows overran the budget. Count every token of the segment instead.
+    let mut tokenizer = (**embedder.tokenizer()).clone();
+    if let Err(e) = tokenizer.with_truncation(None) {
+        eprintln!("[semantra] disable tokenizer truncation for chunking failed: {e}");
+    }
+    match filetype {
+        extract::FileType::Csv => CellChunker.chunk(segments),
+        _ => TokenWindowChunker::new(CHUNK_TOKENS, CHUNK_OVERLAP_TOKENS, |text: &str| {
+            match tokenizer.encode(text, false) {
+                Ok(e) => e.get_offsets().iter().map(|o| o.0).collect(),
+                Err(e) => {
+                    // Falls back to ~1 token per word; embedding inputs are
+                    // still capped by the model's truncation (MAX_INPUT_TOKENS).
+                    eprintln!("[semantra] tokenize segment for chunking failed: {e}");
+                    Vec::new()
+                }
+            }
+        })
+        .snap_to_sentences()
+        .chunk(segments)
+        .into_iter()
+        .filter(|c| chunk::has_words(&c.text))
+        .collect(),
+    }
 }
 
 /// The app-data `files/` dir (worker helper).
@@ -1527,7 +1557,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(AppPaths { files_dir });
 
     // One LanceDB connection, shared (cloned) by the store and catalog.
-    let (store, catalog) = tauri::async_runtime::block_on(async {
+    let (store, catalog, text_stale) = tauri::async_runtime::block_on(async {
         let uri = lancedb_dir
             .to_str()
             .ok_or_else(|| "lancedb path is not valid UTF-8".to_string())?;
@@ -1546,7 +1576,13 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         // triggers automatically the first time the app runs after a switch.
         let active = pipeline_version();
         let stored = catalog.get_meta(DB_MODEL_KEY).await?;
-        if stored.as_deref() != Some(active.as_str()) {
+        // Before the text/media split, the stored version also carried the
+        // chunk geometry (`<base>:tokenwindow:…`): the same base means the
+        // vectors' model is unchanged and only text needs re-chunking.
+        let same_base = stored.as_deref().is_some_and(|v| {
+            v == active || v.strip_prefix(active.as_str()).is_some_and(|rest| rest.starts_with(":tokenwindow:"))
+        });
+        if !same_base {
             let n = catalog.requeue_all_for_reindex(now_ms()).await?;
             let retried = catalog.retry_failed_jobs().await?;
             if retried > 0 {
@@ -1554,16 +1590,20 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
             store::drop_chunks(&conn).await?;
             catalog.set_meta(DB_MODEL_KEY, &active).await?;
+            catalog.set_meta(DB_TEXT_KEY, &text_pipeline_version()).await?;
             if stored.is_some() {
                 eprintln!(
                     "[semantra] embedding pipeline changed to {active}; \
                      re-indexing {n} file reference(s)"
                 );
             }
+        } else if stored.as_deref() != Some(active.as_str()) {
+            catalog.set_meta(DB_MODEL_KEY, &active).await?;
         }
+        let text_stale = catalog.get_meta(DB_TEXT_KEY).await?.as_deref() != Some(text_pipeline_version().as_str());
 
         let store = VectorStore::open(conn, embedding_dim).await?;
-        Ok::<_, String>((store, catalog))
+        Ok::<_, String>((store, catalog, text_stale))
     })?;
     app.manage(SharedStore::new(store));
     app.manage(SharedCatalog::new(catalog));
@@ -1580,7 +1620,92 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let worker_app = app.handle().clone();
     tauri::async_runtime::spawn(async move { index_worker(worker_app).await });
     notify.notify_one();
+
+    // Text chunking changed (but not the model): re-chunk text in the
+    // background, keeping every media vector.
+    if text_stale {
+        let reindex_app = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = reindex_text(&reindex_app).await {
+                eprintln!("[semantra] text re-index failed (will retry next launch): {e}");
+            }
+        });
+    }
     Ok(())
+}
+
+/// Re-chunk and re-embed the text of every committed file whose text rows are
+/// from an older [`text_pipeline_version`], leaving media rows untouched; then
+/// record the new version. Resumable and crash-safe: a file is redone if any
+/// of its text rows are stale, new rows are inserted before the stale ones are
+/// deleted, and leftovers from an interrupted attempt are cleared first. While
+/// a file is mid-pass, search may briefly see both its old and new chunks.
+async fn reindex_text(app: &AppHandle) -> Result<(), String> {
+    let active = text_pipeline_version();
+    let files = app.state::<SharedCatalog>().lock().await.list_files().await?;
+    let embedder = (*app.state::<EmbedService>()).clone();
+    let (mut redone, mut failed) = (0usize, 0usize);
+    for f in &files {
+        match reindex_file_text(app, &embedder, &active, f).await {
+            Ok(false) => {}
+            Ok(true) => {
+                redone += 1;
+                eprintln!("[semantra] re-chunked text of {} ({redone} so far)", f.basename);
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("[semantra] re-chunking {} failed: {e}", f.basename);
+            }
+        }
+    }
+    maybe_maintain_store(app, 1).await;
+    if failed > 0 {
+        // Leave the version unrecorded so the failures are retried next launch.
+        return Err(format!("{failed} file(s) failed; {redone} re-chunked"));
+    }
+    app.state::<SharedCatalog>().lock().await.set_meta(DB_TEXT_KEY, &active).await?;
+    if redone > 0 {
+        eprintln!("[semantra] text re-index complete: {redone} file(s) re-chunked");
+    }
+    Ok(())
+}
+
+/// [`reindex_text`] for one file; `Ok(true)` if it was re-chunked, `Ok(false)`
+/// if its text was already current (or it has none).
+async fn reindex_file_text(
+    app: &AppHandle,
+    embedder: &EmbedService,
+    active: &str,
+    f: &FileRecord,
+) -> Result<bool, String> {
+    let store = app.state::<SharedStore>();
+    let versions = store.lock().await.text_versions(&f.sha512).await?;
+    if versions.iter().all(|v| v == active) {
+        return Ok(false); // already current, or no text at all (images, media)
+    }
+    let sha = &f.sha512;
+    let text_rows = format!("sha512 = '{sha}' AND modality = 'text'");
+    // Partial new rows from an interrupted attempt.
+    store.lock().await.delete_where(&format!("{text_rows} AND pipeline_version = '{active}'")).await?;
+
+    let pdfium = (*app.state::<SharedPdfium>()).clone();
+    let copied = f.copied_path.clone();
+    let extracted = tauri::async_runtime::spawn_blocking(move || extract::extract(&pdfium, &copied))
+        .await
+        .map_err(|e| format!("extract task panicked: {e}"))??;
+    let for_chunking = embedder.clone();
+    let filetype = extracted.filetype;
+    let chunks = tauri::async_runtime::spawn_blocking(move || chunk_segments(&for_chunking, filetype, &extracted.segments))
+        .await
+        .map_err(|e| format!("chunk task panicked: {e}"))?;
+    run_index_pipeline(embedder, &store, chunks, sha.clone(), &|_| {}).await?;
+
+    // Swap: drop the stale rows — or everything, if the file was deleted
+    // while we were embedding.
+    let gone = app.state::<SharedCatalog>().lock().await.get_file(sha).await?.is_none();
+    let stale = if gone { text_rows } else { format!("{text_rows} AND pipeline_version != '{active}'") };
+    store.lock().await.delete_where(&stale).await?;
+    Ok(true)
 }
 
 /// The bundled `mlx.metallib` (Resources/mlx/), if this is a bundled app.
@@ -1620,6 +1745,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| match setup_app(app) {
             Ok(()) => Ok(()),
             // A failed startup used to surface as a panic -> abort (release

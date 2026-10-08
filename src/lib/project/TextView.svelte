@@ -69,7 +69,7 @@
     // read-only view, so scroll the rendered highlight node into view ourselves
     // once the decoration has been painted.
     requestAnimationFrame(() => {
-      view?.dom.querySelector(".pm-highlight")?.scrollIntoView({ block: "start" });
+      view?.dom.querySelector(".pm-highlight")?.scrollIntoView({ block: "center" });
     });
   }
 

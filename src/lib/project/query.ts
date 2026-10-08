@@ -58,24 +58,35 @@ function extractLiterals(raw: string): { remainder: string; literals: string[] }
   return { remainder, literals };
 }
 
-/** Split the non-quoted remainder into weighted semantic terms (mirrors Rust). */
+/**
+ * Split the non-quoted remainder into weighted semantic terms (mirrors Rust's
+ * `parse_weighted_terms`). A `+`/`-` is only an operator at the start or after
+ * whitespace, so hyphenated words (`left-wing`) stay whole.
+ */
 function parseWeightedTerms(text: string): WeightedTerm[] {
-  const regex = /([+\-]?\d*\.?\d*\s*)?([^+\-]+)/g;
+  const chars = Array.from(text);
+  const n = chars.length;
+  const isWs = (c: string) => /\s/.test(c);
+  const isSign = (c: string) => c === "+" || c === "-";
   const out: WeightedTerm[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(text)) !== null) {
-    const prefix = match[1] ?? "";
-    const term = (match[2] ?? "").trim();
-    if (!term) continue;
-    const parsed = parseFloat(prefix);
+  let i = 0;
+  while (i < n) {
+    while (i < n && isWs(chars[i])) i++;
+    if (i >= n) break;
+    let sign: string | null = null;
+    if (isSign(chars[i])) sign = chars[i++];
+    const numStart = i;
+    while (i < n && /[\d.]/.test(chars[i])) i++;
+    const num = chars.slice(numStart, i).join("");
+    while (i < n && isWs(chars[i])) i++;
+    const textStart = i;
+    while (i < n && !(isSign(chars[i]) && i > 0 && isWs(chars[i - 1]))) i++;
+    const term = chars.slice(textStart, i).join("").trim();
+    const parsed = parseFloat(num);
     const weight = !Number.isNaN(parsed)
-      ? prefix.includes("-")
-        ? -Math.abs(parsed)
-        : parsed
-      : prefix.includes("-")
-        ? -1
-        : 1;
-    out.push({ text: term, weight });
+      ? sign === "-" ? -Math.abs(parsed) : parsed
+      : sign === "-" ? -1 : 1;
+    if (term) out.push({ text: term, weight });
   }
   return out;
 }
