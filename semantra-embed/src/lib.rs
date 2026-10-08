@@ -32,6 +32,13 @@ pub use onnx::{set_metallib_path, set_onnxruntime_path, Model, PatchGrid, SoftFr
 
 pub use crate::service::{EmbedService, Lane};
 
+/// The backend this build runs: `"mlx"` (Apple Silicon) or `"onnx"`.
+#[cfg(backend_mlx)]
+pub const BACKEND: &str = "mlx";
+/// The backend this build runs: `"mlx"` (Apple Silicon) or `"onnx"`.
+#[cfg(backend_onnx)]
+pub const BACKEND: &str = "onnx";
+
 /// Search-query prompt (the model's `SearchQuery` / `Retrieval-query` prompt).
 pub const QUERY_PREFIX: &str = "task: search result | query: ";
 

@@ -133,10 +133,20 @@ const DB_MODEL_KEY: &str = "active_pipeline";
 /// match; set once a text-only re-index pass completes.
 const DB_TEXT_KEY: &str = "active_text_pipeline";
 
+/// Model folder under `models/` for this build's backend: the BF16
+/// safetensors checkout for MLX (Apple Silicon), the fp16 ONNX export
+/// elsewhere (see fetch-model.sh / fetch-model-onnx.sh).
+fn model_folder() -> String {
+    match semantra_embed::BACKEND {
+        "onnx" => format!("{MODEL_NAME}-onnx"),
+        _ => MODEL_NAME.to_string(),
+    }
+}
+
 /// Resolve the directory that holds the bundled model files (resource dir, then
 /// dev-tree fallback — `tauri dev` does not reliably copy resources).
 fn resolve_model_dir(app: &tauri::App) -> Result<PathBuf, String> {
-    let rel = format!("models/{MODEL_NAME}");
+    let rel = format!("models/{}", model_folder());
     let resource_models = app
         .path()
         .resolve(&rel, tauri::path::BaseDirectory::Resource)
@@ -174,6 +184,25 @@ fn resolve_pdfium_dir(app: &tauri::App) -> Result<PathBuf, String> {
         resource.display(),
         dev.display()
     ))
+}
+
+/// File name of the ONNX Runtime library bundled for this platform (fetched by
+/// scripts/fetch-onnxruntime.sh into `onnxruntime/`).
+const ONNXRUNTIME_LIB: &str = if cfg!(target_os = "windows") {
+    "onnxruntime.dll"
+} else if cfg!(target_os = "macos") {
+    "libonnxruntime.dylib"
+} else {
+    "libonnxruntime.so"
+};
+
+/// The bundled ONNX Runtime library (resource dir, then dev tree), for the ONNX
+/// backend. `None` leaves the backend to `ORT_DYLIB_PATH` / the system library.
+fn resolve_onnxruntime(app: &tauri::App) -> Option<PathBuf> {
+    let rel = format!("onnxruntime/{ONNXRUNTIME_LIB}");
+    let resource = app.path().resolve(&rel, tauri::path::BaseDirectory::Resource).ok();
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&rel);
+    resource.into_iter().chain([dev]).find(|p| p.exists())
 }
 
 /// Current wall-clock in epoch milliseconds (for `created_at`/`added_at`).
@@ -863,7 +892,7 @@ async fn process_job(app: &AppHandle, job: &Job) -> Result<(), String> {
 /// Chunk extracted segments for embedding. CSVs index one chunk per cell (the
 /// segments are already cells); everything else uses sentence-snapped token
 /// windows sized by the model's own tokenizer, minus windows with no words.
-fn chunk_segments(embedder: &EmbedService, filetype: extract::FileType, segments: &[chunk::Segment]) -> Vec<Chunk> {
+pub fn chunk_segments(embedder: &EmbedService, filetype: extract::FileType, segments: &[chunk::Segment]) -> Vec<Chunk> {
     // The shared tokenizer truncates at the model's input cap (2048 tokens),
     // which would leave the rest of a long segment (a whole plain-text file,
     // a dense page) without token offsets — costed ~1 token per word, so its
@@ -1531,6 +1560,11 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(metallib) = metallib_resource(app) {
         semantra_embed::set_metallib_path(&metallib).map_err(|e| e.to_string())?;
     }
+    // The ONNX backend (Windows, Linux, Intel Macs) loads the bundled ONNX
+    // Runtime library at runtime. (Both calls are no-ops on the other backend.)
+    if let Some(ort) = resolve_onnxruntime(app) {
+        semantra_embed::set_onnxruntime_path(&ort).map_err(|e| e.to_string())?;
+    }
 
     // Load the model on its inference thread (which then warms up the
     // Metal kernels in the background before taking any work).
@@ -1717,12 +1751,26 @@ fn metallib_resource(app: &tauri::App) -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-/// Startup failed: write the error to ~/Library/Logs/Semantra/startup-error.log
-/// and show it in a native alert (the window isn't usable yet).
+/// Where startup-error.log goes: ~/Library/Logs/Semantra (macOS),
+/// %LOCALAPPDATA%\Semantra\logs (Windows), $XDG_STATE_HOME/semantra or
+/// ~/.local/state/semantra (Linux).
+fn log_dir() -> Option<PathBuf> {
+    let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
+    if cfg!(target_os = "macos") {
+        env("HOME").map(|h| h.join("Library/Logs/Semantra"))
+    } else if cfg!(target_os = "windows") {
+        env("LOCALAPPDATA").map(|d| d.join("Semantra").join("logs"))
+    } else {
+        env("XDG_STATE_HOME").or_else(|| env("HOME").map(|h| h.join(".local/state"))).map(|d| d.join("semantra"))
+    }
+}
+
+/// Startup failed: write the error to startup-error.log in [`log_dir`] and
+/// show it in a native alert (the window isn't usable yet).
 fn report_startup_failure(message: &str) {
     eprintln!("[semantra] startup failed: {message}");
-    if let Some(home) = std::env::var_os("HOME") {
-        let dir = PathBuf::from(home).join("Library/Logs/Semantra");
+    let log_path = log_dir().map(|d| d.join("startup-error.log"));
+    if let Some(dir) = log_dir() {
         if std::fs::create_dir_all(&dir).is_ok() {
             let _ = std::fs::write(
                 dir.join("startup-error.log"),
@@ -1733,9 +1781,10 @@ fn report_startup_failure(message: &str) {
     let _ = rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
         .set_title("Semantra couldn't start")
-        .set_description(format!(
-            "{message}\n\nDetails were saved to ~/Library/Logs/Semantra/startup-error.log."
-        ))
+        .set_description(match &log_path {
+            Some(p) => format!("{message}\n\nDetails were saved to {}.", p.display()),
+            None => message.to_string(),
+        })
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
 }

@@ -7,6 +7,12 @@ fn main() {
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let force_onnx = std::env::var_os("CARGO_FEATURE_ONNX").is_some();
+    // AVFoundation's Swift overlays (e.g. libswiftCoreMedia) live in the OS's
+    // /usr/lib/swift; without this rpath, binaries that don't otherwise pull
+    // it in (Intel builds, which have no MLX) fail to launch.
+    if os == "macos" {
+        println!("cargo::rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+    }
     if os == "macos" && arch == "aarch64" && !force_onnx {
         println!("cargo::rustc-cfg=backend_mlx");
     } else {

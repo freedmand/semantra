@@ -37,6 +37,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Integration tests open a temp LanceDB connection directly to construct stores.
 lancedb = "0.30"
 
+[features]
+# Run the ONNX Runtime embedding backend on Apple Silicon too (the default
+# there is MLX; every other platform always uses ONNX). For local testing.
+onnx = ["semantra-embed/onnx"]
+
 [dependencies]
 # `protocol-asset` enables the `asset:`/`convertFileSrc` protocol so PDF.js can
 # stream copied PDFs from the app-data dir (scoped in tauri.conf.json).
