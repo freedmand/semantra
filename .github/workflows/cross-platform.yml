@@ -100,9 +100,51 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash src-tauri/scripts/fetch-model-onnx.sh
 
+      # Windows/Linux: the ffmpeg sidecar the portable decoders use for video
+      # (and HEIC / extra audio codecs). Bundled via bundle.externalBin.
+      - name: Fetch ffmpeg sidecar
+        if: runner.os != 'macOS'
+        run: bash src-tauri/scripts/fetch-ffmpeg.sh ${{ matrix.ort }}
+
+      # Test media for the smoke test: made with the sidecar where there is one,
+      # else (Intel Mac, native AVFoundation decoding) with Python's stdlib.
+      - name: Generate test media
+        run: |
+          mkdir -p "$RUNNER_TEMP/media"
+          ff="$(find "$GITHUB_WORKSPACE/src-tauri/binaries" -name 'ffmpeg-*' 2>/dev/null | head -1)"
+          if [[ -n "$ff" ]]; then
+            "$ff" -loglevel error -f lavfi -i testsrc=size=1280x720:rate=1 -frames:v 1 "$RUNNER_TEMP/media/still.png"
+            "$ff" -loglevel error -f lavfi -i sine=frequency=440:duration=5 -ar 44100 -ac 2 "$RUNNER_TEMP/media/tone.wav"
+            "$ff" -loglevel error -f lavfi -i testsrc=size=1280x720:rate=24 -f lavfi -i sine=frequency=330 \
+              -t 18 -pix_fmt yuv420p -c:v libopenh264 -c:a aac -shortest "$RUNNER_TEMP/media/clip.mp4" \
+              || "$ff" -loglevel error -f lavfi -i testsrc=size=1280x720:rate=24 -t 18 -pix_fmt yuv420p "$RUNNER_TEMP/media/clip.mp4"
+            echo "SMOKE_MEDIA=$RUNNER_TEMP/media/still.png $RUNNER_TEMP/media/tone.wav $RUNNER_TEMP/media/clip.mp4" >> "$GITHUB_ENV"
+            echo "SEMANTRA_FFMPEG=$ff" >> "$GITHUB_ENV"
+          else
+            python3 - "$RUNNER_TEMP/media" <<'PY'
+          import math, struct, sys, wave, zlib
+          out = sys.argv[1]
+          w, h = 640, 480
+          raw = b"".join(b"\0" + b"".join(bytes((x * 255 // w, y * 255 // h, 128)) for x in range(w)) for y in range(h))
+          def chunk(t, d): return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+          png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+          open(f"{out}/still.png", "wb").write(png)
+          with wave.open(f"{out}/tone.wav", "wb") as f:
+              f.setnchannels(1); f.setsampwidth(2); f.setframerate(44100)
+              f.writeframes(b"".join(struct.pack("<h", int(12000 * math.sin(2 * math.pi * 440 * i / 44100))) for i in range(44100 * 5)))
+          PY
+            echo "SMOKE_MEDIA=$RUNNER_TEMP/media/still.png $RUNNER_TEMP/media/tone.wav" >> "$GITHUB_ENV"
+          fi
+          ls -la "$RUNNER_TEMP/media"
+
       - name: semantra-embed unit tests
         working-directory: semantra-embed
         run: cargo test --release --lib --target ${{ matrix.rust_target }}
+
+      - name: Portable media decoder tests
+        if: runner.os != 'macOS'
+        working-directory: semantra-media-portable
+        run: cargo test --release --target ${{ matrix.rust_target }}
 
       # Every Model method end to end on this platform's ONNX Runtime (CPU).
       - name: semantra-embed smoke test
@@ -112,8 +154,9 @@ jobs:
         run: |
           lib="$(find "$GITHUB_WORKSPACE/src-tauri/onnxruntime" -maxdepth 1 \( -name onnxruntime.dll -o -name libonnxruntime.so -o -name libonnxruntime.dylib \) | head -1)"
           echo "ONNX Runtime: $lib"
+          # shellcheck disable=SC2086 # SMOKE_MEDIA is a space-separated list
           ORT_DYLIB_PATH="$lib" cargo run --release --target ${{ matrix.rust_target }} --example smoke -- \
-            "$GITHUB_WORKSPACE/src-tauri/models/embeddinggemma-2-onnx"
+            "$GITHUB_WORKSPACE/src-tauri/models/embeddinggemma-2-onnx" $SMOKE_MEDIA
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4

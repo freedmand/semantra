@@ -2,7 +2,7 @@
 //! CI on each platform, and for bisecting crashes). Media steps run when files
 //! are given.
 //!
-//!   cargo run --release --example smoke -- <model_dir> [image] [audio]
+//!   cargo run --release --example smoke -- <model_dir> [image] [audio] [video]
 use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
@@ -50,6 +50,18 @@ fn main() -> Result<()> {
             })
         })?;
         step("embed audio", || model.embed_audio(&[&clip]))?;
+    }
+    if let Some(vid) = a.get(4) {
+        let path = Path::new(vid);
+        let probe = step("probe video", || av::probe(path))?;
+        println!("  {probe:?}");
+        let times: Vec<f64> = (0..16).map(|i| i as f64 + 0.5).filter(|t| *t < probe.duration_s).collect();
+        let frames = step("decode frames", || av::frames_at(path, &times, 1344, 0.5))?;
+        println!("  {} frames, {}x{}", frames.len(), frames[0].width, frames[0].height);
+        let prepared: Vec<image::Prepared> =
+            frames.iter().map(|f| image::prepare(f, image::FRAME_SOFT_TOKENS)).collect::<Result<_>>()?;
+        let soft = step("vision soft tokens", || model.visual_soft_tokens(&image::stack(&prepared.iter().collect::<Vec<_>>())?))?;
+        step("embed frame window", || model.embed_frame_window(&[&soft]))?;
     }
     println!("smoke: all steps passed");
     Ok(())

@@ -53,13 +53,11 @@ objc2-foundation = "0.3"
 objc2-av-foundation = { version = "0.3", features = ["objc2-core-media", "objc2-core-graphics"] }
 objc2-core-media = "0.3"
 
-# Portable media decoding elsewhere: `image` for stills (with EXIF
-# orientation), Symphonia for audio and video soundtracks (MP3, AAC/M4A/MP4,
-# FLAC, WAV, AIFF, Vorbis), Rubato to resample to 16 kHz.
+# Portable media decoding elsewhere (Windows, Linux): semantra-media-portable
+# — `image` + moxcms for stills, Symphonia + Rubato for audio, and an ffmpeg
+# CLI sidecar for video frames and the audio codecs Symphonia lacks.
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "tiff", "bmp"] }
-symphonia = { version = "0.5", features = ["all"] }
-rubato = "0.16"
+semantra-media-portable = { path = "../semantra-media-portable" }
 
 [dev-dependencies]
 # Reads the 16-bit PCM WAV fixtures in the golden parity tests.

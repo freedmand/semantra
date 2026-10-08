@@ -17,3 +17,4 @@ vite.config.ts.timestamp-*
 # ONNX backend artifacts (fetched: scripts/fetch-model-onnx.sh, scripts/fetch-onnxruntime.sh)
 src-tauri/models/embeddinggemma-2-onnx
 src-tauri/onnxruntime/
+src-tauri/binaries/

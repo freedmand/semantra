@@ -7,6 +7,7 @@
 //! JPEG/HEIC) to [`DECODE_MAX_SIDE`], so a 48 MP photo never materializes at
 //! full size. Elsewhere the portable decoder (`media::portable`) is used.
 
+#[cfg(target_os = "macos")]
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Result};
@@ -44,12 +45,15 @@ const PATCH: u32 = 16;
 const POOL: u32 = 3;
 
 /// Packed 8-bit RGB pixels.
+#[cfg(target_os = "macos")]
 #[derive(Clone)]
 pub struct Rgb8 {
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>,
 }
+#[cfg(not(target_os = "macos"))]
+pub use semantra_media_portable::image::Rgb8;
 
 /// One image resized for the vision tower: `(rows·16) × (cols·16)` 8-bit RGB,
 /// row-major HWC. Kept as bytes (4x smaller than F32) until [`stack`] uploads

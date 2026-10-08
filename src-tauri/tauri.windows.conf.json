@@ -12,6 +12,9 @@
       "models/embeddinggemma-2-onnx/onnx/*",
       "libpdfium/*",
       "onnxruntime/*"
+    ],
+    "externalBin": [
+      "binaries/ffmpeg"
     ]
   }
 }
