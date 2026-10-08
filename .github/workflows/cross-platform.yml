@@ -1,0 +1,143 @@
+name: Cross-platform (ONNX backend)
+
+# Builds and tests the ONNX Runtime embedding backend on every non-Apple-Silicon
+# platform — Windows, Linux, Intel Mac — and produces an (unsigned) installer
+# per platform as a workflow artifact. Apple Silicon keeps MLX and is covered by
+# release.yml.
+#
+# Runs on pushes to experiment branches and on demand. Runners have no GPU, so
+# the smoke test forces ONNX Runtime's CPU provider; GPUs (WebGPU via D3D12 /
+# Vulkan) are used automatically on real machines.
+
+on:
+  push:
+    branches:
+      - "exp/**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            ort: windows-x64
+            bundle_glob: "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*"
+          - name: Linux x64
+            os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            ort: linux-x64
+            bundle_glob: "src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/*/*"
+          - name: macOS (Intel)
+            os: macos-15-intel
+            rust_target: x86_64-apple-darwin
+            ort: macos-x64
+            bundle_glob: "src-tauri/target/x86_64-apple-darwin/release/bundle/*/*"
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libgtk-3-dev patchelf
+
+      # lance/datafusion run protoc at build time.
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            semantra-embed -> target
+            src-tauri -> target
+          key: ${{ matrix.rust_target }}
+
+      # Intel Macs: Microsoft publishes no x86_64 macOS ONNX Runtime after 1.16,
+      # so build 1.27 from source once and cache it (~1 h on the runner).
+      - name: Cache ONNX Runtime source build (Intel Mac)
+        if: matrix.ort == 'macos-x64'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/semantra/onnxruntime-1.27.0/onnxruntime/build/x86_64/Release/libonnxruntime.1.27.0.dylib
+          key: onnxruntime-1.27.0-macos-x64-v1
+
+      - name: Fetch ONNX Runtime
+        run: bash src-tauri/scripts/fetch-onnxruntime.sh ${{ matrix.ort }}
+
+      - name: Cache ONNX model
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/models/embeddinggemma-2-onnx
+          key: embeddinggemma-2-onnx-fp16-v1
+
+      - name: Fetch ONNX model
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: bash src-tauri/scripts/fetch-model-onnx.sh
+
+      - name: semantra-embed unit tests
+        working-directory: semantra-embed
+        run: cargo test --release --lib --target ${{ matrix.rust_target }}
+
+      # Every Model method end to end on this platform's ONNX Runtime (CPU).
+      - name: semantra-embed smoke test
+        working-directory: semantra-embed
+        env:
+          SEMANTRA_ORT_EP: cpu
+        run: |
+          lib="$(ls "$GITHUB_WORKSPACE"/src-tauri/onnxruntime/*onnxruntime.{dll,so,dylib} 2>/dev/null | head -1)"
+          ORT_DYLIB_PATH="$lib" cargo run --release --target ${{ matrix.rust_target }} --example smoke -- \
+            "$GITHUB_WORKSPACE/src-tauri/models/embeddinggemma-2-onnx"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: App unit tests
+        working-directory: src-tauri
+        run: cargo test --release --lib --target ${{ matrix.rust_target }}
+
+      # Unsigned installer per platform (the ONNX bundle config is merged
+      # automatically on Windows/Linux; Intel Macs pass it explicitly).
+      - name: Build installer
+        run: pnpm tauri build --target ${{ matrix.rust_target }} --config src-tauri/tauri.onnx.conf.json --no-sign
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: semantra-${{ matrix.rust_target }}
+          path: ${{ matrix.bundle_glob }}
+          retention-days: 7
+          if-no-files-found: error

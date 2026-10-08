@@ -62,6 +62,17 @@ fn run_lock() -> std::sync::MutexGuard<'static, ()> {
 /// it, `ORT_DYLIB_PATH` or the platform's default library name is used.
 pub fn set_onnxruntime_path(path: &Path) -> Result<()> {
     let p = path.to_str().ok_or_else(|| anyhow!("non-UTF-8 onnxruntime path"))?;
+    // Windows resolves a DLL's own dependencies (onnxruntime_providers_shared,
+    // the DirectX shader compiler for WebGPU) from the process's search path,
+    // not the DLL's folder — so put that folder first. Called at startup,
+    // before any other thread reads the environment.
+    if cfg!(target_os = "windows") {
+        if let Some(dir) = path.parent() {
+            let mut paths = vec![dir.to_path_buf()];
+            paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+            std::env::set_var("PATH", std::env::join_paths(paths)?);
+        }
+    }
     ORT_DYLIB.set(p.to_string()).map_err(|_| anyhow!("onnxruntime path already set"))
 }
 

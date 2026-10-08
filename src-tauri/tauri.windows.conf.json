@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBundleCommand": "bash src-tauri/scripts/stage-onnx.sh"
+  },
+  "bundle": {
+    "targets": [
+      "nsis"
+    ],
+    "resources": [
+      "models/embeddinggemma-2-onnx/*.json",
+      "models/embeddinggemma-2-onnx/onnx/*",
+      "libpdfium/*",
+      "onnxruntime/*"
+    ]
+  }
+}
