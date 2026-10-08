@@ -438,7 +438,7 @@ impl Model {
     /// `frames` frames of soft tokens (frame-major) -> one embedding per item
     /// of `per_item` frames.
     fn embed_frames(&self, soft: Array2<f32>, frames: usize, per_item: usize) -> Result<Embeddings> {
-        if frames == 0 || frames % per_item != 0 {
+        if frames == 0 || !frames.is_multiple_of(per_item) {
             bail!("{frames} frames do not divide into items of {per_item}");
         }
         let n = soft.shape()[0] / frames;
