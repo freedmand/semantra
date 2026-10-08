@@ -18,3 +18,4 @@ vite.config.ts.timestamp-*
 src-tauri/models/embeddinggemma-2-onnx
 src-tauri/onnxruntime/
 src-tauri/binaries/
+semantra-media-portable/target/
