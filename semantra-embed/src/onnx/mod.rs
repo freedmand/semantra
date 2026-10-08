@@ -46,6 +46,17 @@ pub fn set_metallib_path(_path: &Path) -> Result<()> {
 
 static ORT_DYLIB: OnceLock<String> = OnceLock::new();
 
+/// Serializes every session run in the process. The WebGPU device (Dawn) is
+/// shared across sessions and not safe to drive from several threads at once
+/// — concurrent runs abort inside Metal/D3D. The app already funnels model
+/// work through one inference thread; this keeps any other caller (several
+/// `Model`s, tests) safe too, at no cost: the GPU runs one graph at a time.
+static RUN: Mutex<()> = Mutex::new(());
+
+fn run_lock() -> std::sync::MutexGuard<'static, ()> {
+    RUN.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Point the backend at the ONNX Runtime shared library to load (the app
 /// bundles one per platform). Must be called before [`Model::load`]; without
 /// it, `ORT_DYLIB_PATH` or the platform's default library name is used.
@@ -332,6 +343,7 @@ impl Model {
     /// The text encoder -> per-token (B, L, 768) states.
     fn run_text(&self, ids: Array2<i64>, mask: Array2<i64>, soft: Soft) -> Result<Array3<f32>> {
         let empty = || Array2::<f32>::zeros((0, SOFT_DIM));
+        let _run = run_lock();
         let mut text = self.text.lock().map_err(|_| anyhow!("text session poisoned"))?;
         let out = text.run(ort::inputs![
             "input_ids" => Tensor::from_array(ids)?,
@@ -358,6 +370,7 @@ impl Model {
     fn vision_soft(&self, grid: &PatchGrid) -> Result<Array2<f32>> {
         let vision = self.vision.as_ref().ok_or_else(|| anyhow!("this model has no vision encoder"))?;
         let n = (grid.rows * grid.cols) as usize;
+        let _run = run_lock();
         let mut vision = vision.lock().map_err(|_| anyhow!("vision session poisoned"))?;
         let out = vision.run(ort::inputs![
             "pixel_values" => Tensor::from_array(Array3::from_shape_vec((grid.frames, n, 768), grid.pixels.clone())?)?,
@@ -381,6 +394,7 @@ impl Model {
             features.extend(f);
             masks.extend((0..n).map(|i| i < valid));
         }
+        let _run = run_lock();
         let mut audio = audio.lock().map_err(|_| anyhow!("audio session poisoned"))?;
         let out = audio.run(ort::inputs![
             "input_features" => Tensor::from_array(Array3::from_shape_vec((clips.len(), frames, 128), features)?)?,

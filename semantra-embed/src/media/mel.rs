@@ -143,7 +143,7 @@ mod tests {
         let (cpu, frames, valid) = log_mel_cpu(&clip).unwrap();
         let (gpu, mask) = log_mel(&[&clip]).unwrap();
         assert_eq!(gpu.shape(), &[1, frames as i32, MELS as i32]);
-        assert_eq!(mask.as_dtype(Dtype::Int32).unwrap().sum(None).unwrap().item::<i32>() as usize, valid);
+        assert_eq!(mask.as_dtype(Dtype::Int32).unwrap().sum(None).unwrap().item_cast::<i32>() as usize, valid);
         let gpu: Vec<f32> = gpu.as_slice::<f32>().to_vec();
         // Both are F32 FFTs; log(x + 1e-3) amplifies rounding near the floor.
         let diffs: Vec<f32> = cpu.iter().zip(&gpu).map(|(a, b)| (a - b).abs()).collect();

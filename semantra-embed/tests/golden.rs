@@ -3,6 +3,10 @@
 //! Needs the model and golden vectors produced by the lab scripts; set
 //! `EG2_MODEL_DIR` (google/embeddinggemma-2 checkout) and `EG2_GOLDEN_DIR`
 //! (holding `texts.json` + `embeddings.json`). Skips when they are absent.
+//!
+//! Runs on both backends (point `EG2_MODEL_DIR` at the MLX checkout or the
+//! ONNX model dir to match the build). The processor-patch case is MLX-only
+//! (it feeds MLX arrays directly) and the AVFoundation case macOS-only.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -79,6 +83,7 @@ fn explain_decomposes_cosine_exactly() {
     }
 }
 
+#[cfg(backend_mlx)]
 fn load_patches(golden: &std::path::Path, name: &str) -> (mlx_rs::Array, i32, i32, usize) {
     let meta: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(golden.join("patches.json")).unwrap()).unwrap();
@@ -95,6 +100,7 @@ fn load_patches(golden: &std::path::Path, name: &str) -> (mlx_rs::Array, i32, i3
 }
 
 #[test]
+#[cfg(backend_mlx)]
 fn vision_matches_fp32_reference_on_processor_patches() {
     let Some((model_dir, golden)) = dirs() else { return };
     let gold: HashMap<String, Vec<f32>> =
@@ -144,9 +150,18 @@ fn audio_matches_fp32_reference() {
 
     // Front end: our log-mel vs the reference processor's features.
     let pcm = read_wav(&media.join("pasta.wav"));
-    let (mel, _) = semantra_embed::media::mel::log_mel(&[&pcm]).unwrap();
-    mel.eval().unwrap();
+    #[cfg(backend_mlx)]
+    let mel = {
+        let (mel, _) = semantra_embed::media::mel::log_mel(&[&pcm]).unwrap();
+        mel.eval().unwrap();
+        mel
+    };
+    #[cfg(backend_mlx)]
     let ours: &[f32] = mel.as_slice();
+    #[cfg(backend_onnx)]
+    let (cpu, _, _) = semantra_embed::media::mel::log_mel_cpu(&pcm).unwrap();
+    #[cfg(backend_onnx)]
+    let ours: &[f32] = &cpu;
     let theirs: Vec<f32> = std::fs::read(golden.join("mel_aud_pasta.f32"))
         .unwrap()
         .chunks_exact(4)
@@ -169,6 +184,7 @@ fn audio_matches_fp32_reference() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn avfoundation_decoding_matches_reference() {
     let Some((model_dir, golden)) = dirs() else { return };
     let media = golden.parent().unwrap().join("media");
